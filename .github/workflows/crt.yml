@@ -40,21 +40,25 @@ jobs:
 
       - run: pip install pandas tradingview-datafeed
 
-      # Garde la dédup des alertes d'une exécution à l'autre (sinon ré-alertes).
-      - name: Restaure la dédup des alertes
+      # Garde l'état d'une exécution à l'autre : dédup des alertes, historique,
+      # date du dernier récap quotidien.
+      - name: Restaure l'état (dédup + historique + récap)
         uses: actions/cache@v4
         with:
-          path: .crt_seen.json
-          key: crt-seen-${{ github.run_id }}
-          restore-keys: crt-seen-
+          path: |
+            .crt_seen.json
+            .crt_history.json
+            .crt_state.json
+          key: crt-state-${{ github.run_id }}
+          restore-keys: crt-state-
 
-      - name: Scan + alertes Telegram + dashboard
+      - name: Scan + alertes Telegram + dashboard + historique
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           mkdir -p public
-          python crt_scanner.py --crt-window 5 --skip-session 22 7 --telegram --html public/index.html
+          python crt_scanner.py --crt-window 5 --skip-session 22 7 --daily-recap 8 --telegram --html public/index.html
 
       # Publication du dashboard sur GitHub Pages
       - uses: actions/configure-pages@v5

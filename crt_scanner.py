@@ -287,12 +287,20 @@ def weekly_context(source: Source, symbol: str, window: int = 1):
 # ===========================================================================
 # 4) Telegram (lib standard, aucune dépendance)
 # ===========================================================================
-def send_telegram(token: str, chat_id: str, text: str) -> bool:
+def tv_url(symbol: str) -> str:
+    """Lien direct vers le graphique TradingView du symbole (ex. OANDA:XAUUSD)."""
+    return "https://www.tradingview.com/chart/?symbol=" + urllib.parse.quote(symbol, safe="")
+
+
+def send_telegram(token: str, chat_id: str, text: str, buttons=None) -> bool:
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = urllib.parse.urlencode({
+    payload = {
         "chat_id": chat_id, "text": text,
         "parse_mode": "HTML", "disable_web_page_preview": "true",
-    }).encode()
+    }
+    if buttons:                                   # buttons = [[{"text":..,"url":..}], ...]
+        payload["reply_markup"] = json.dumps({"inline_keyboard": buttons})
+    data = urllib.parse.urlencode(payload).encode()
     try:
         with urllib.request.urlopen(urllib.request.Request(url, data=data), timeout=20) as r:
             return r.status == 200
@@ -307,18 +315,65 @@ _LABEL = {"bull": ("🟢", "LONG"), "bear": ("🔴", "SHORT"), "both": ("⚪", "
 _JOURS_FR = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"]
 
 
-def format_alert(symbol: str, h: "H4Hit", confirmed: list) -> str:
-    """Alerte : une manipulation H4 qui confirme un ou plusieurs modèles weekly."""
-    emoji, dlab = _LABEL[h.direction]
-    sym = symbol.split(":")[-1]            # BINANCE:BTCUSDT -> BTCUSDT
+def _hit_line(h: "H4Hit", confirmed: list) -> str:
     dt = datetime.fromtimestamp(h.ts / 1000, tz=DISPLAY_TZ)
     when = f"{_JOURS_FR[dt.weekday()]} {dt:%H:%M}"
     sizes = ", ".join(f"{w.span + 2}C" for w in sorted(confirmed, key=lambda c: c.span))
-    return (
-        f"{emoji} <b>{sym} · {dlab}</b>\n"
-        f"🕓 H4 · {when} · {h.span + 2}C\n"
-        f"📐 confirme Weekly {dlab} · {sizes}"
-    )
+    return f"  • H4 {when} · {h.span + 2}C  <i>(Weekly {sizes})</i>"
+
+
+def _pair_buttons(symbols):
+    """Un bouton URL TradingView par symbole (1 par ligne)."""
+    seen, out = set(), []
+    for s in symbols:
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append([{"text": f"📈 {s.split(':')[-1]}", "url": tv_url(s)}])
+    return out
+
+
+def format_digest(new_items: list) -> tuple:
+    """new_items = [(symbol, H4Hit, confirmed)]. Renvoie (texte, boutons) d'un seul message."""
+    groups: dict = {}
+    order = []
+    for symbol, h, confirmed in new_items:
+        k = (symbol, h.direction)
+        if k not in groups:
+            groups[k] = []
+            order.append(k)
+        groups[k].append((h, confirmed))
+
+    n = len(new_items)
+    head = f"🔔 <b>{n} nouveau{'x' if n > 1 else ''} setup{'s' if n > 1 else ''} CRT</b>"
+    blocks = []
+    for symbol, d in order:
+        emoji, dlab = _LABEL[d]
+        sym = symbol.split(":")[-1]
+        lines = "\n".join(_hit_line(h, c) for h, c in
+                          sorted(groups[(symbol, d)], key=lambda x: x[0].ts, reverse=True))
+        blocks.append(f"{emoji} <b>{sym} · {dlab}</b>\n{lines}")
+    text = head + "\n\n" + "\n\n".join(blocks)
+    return text, _pair_buttons([s for s, _ in order])
+
+
+def build_recap(results: list, stamp: str) -> tuple:
+    """Récap quotidien : tous les modèles weekly actifs et le nb de confluences H4."""
+    head = f"📊 <b>Récap CRT du jour</b>\n<i>{html.escape(stamp)}</i>"
+    blocks, syms = [], []
+    for res in sorted(results, key=lambda r: r.symbol):
+        if not res.weekly:
+            continue
+        sym = res.symbol.split(":")[-1]
+        parts = []
+        for w in sorted(res.weekly, key=lambda c: c.span):
+            emoji, dlab = _LABEL[w.direction]
+            nh = sum(1 for hh in res.h4s if dir_aligned(w.direction, hh.direction))
+            parts.append(f"{emoji} W{w.span + 2}C {dlab} ({nh} H4)")
+        blocks.append(f"<b>{sym}</b> · " + " | ".join(parts))
+        syms.append(res.symbol)
+    text = head + "\n\n" + ("\n".join(blocks) if blocks else "Aucun setup actif aujourd'hui.")
+    return text, _pair_buttons(syms)
 
 
 # ===========================================================================
@@ -475,21 +530,77 @@ def run_once(source, symbols, require_align, out=None, tg=None, seen_path=None,
 
 
 def send_new_alerts(results: list["SymResult"], tg, seen_path):
-    """Envoie sur Telegram les manips H4 (confirmant ≥1 modèle weekly) non encore notifiées."""
+    """Envoie UN message digest groupant les nouvelles manips H4 (dédup). Renvoie (envoyés, total)."""
     token, chat_id = tg
     seen = load_seen(seen_path)
     now_iso = datetime.now(timezone.utc).isoformat()
-    sent = total = 0
+    new_items, new_keys, total = [], [], 0
     for symbol, weekly_ts, h, confirmed in iter_alerts(results):
         total += 1
         key = alert_key(symbol, weekly_ts, h)
         if key in seen:
             continue
-        if send_telegram(token, chat_id, format_alert(symbol, h, confirmed)):
+        new_items.append((symbol, h, confirmed))
+        new_keys.append(key)
+
+    if new_items:
+        text, buttons = format_digest(new_items)
+        if not send_telegram(token, chat_id, text, buttons):
+            return 0, total                       # échec : on ne marque rien comme vu
+        for key in new_keys:
             seen[key] = now_iso
-            sent += 1
     save_seen(seen_path, seen)
-    return sent, total
+    return len(new_items), total
+
+
+def maybe_send_recap(results, tg, state_path, recap_hour, stamp) -> bool:
+    """Envoie le récap quotidien une fois par jour, à partir de recap_hour (fuseau --tz)."""
+    if recap_hour is None or not tg:
+        return False
+    now = datetime.now(tz=DISPLAY_TZ)
+    if now.hour < recap_hour:
+        return False
+    state = load_json(state_path)
+    today = now.strftime("%Y-%m-%d")
+    if state.get("last_recap") == today:
+        return False
+    text, buttons = build_recap(results, stamp)
+    if send_telegram(tg[0], tg[1], text, buttons):
+        state["last_recap"] = today
+        save_json(state_path, state)
+        return True
+    return False
+
+
+# --- Persistance JSON générique + historique des setups ---------------------
+def load_json(path: str) -> dict:
+    if not path or not os.path.exists(path):
+        return {}
+    try:
+        return json.load(open(path, encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_json(path: str, obj) -> None:
+    if path:
+        json.dump(obj, open(path, "w", encoding="utf-8"))
+
+
+def update_history(hist: dict, results: list, now_ms: int):
+    """Ajoute les confluences inédites à l'historique (clé unique), purge au-delà de 30 j."""
+    new = 0
+    for symbol, weekly_ts, h, confirmed in iter_alerts(results):
+        key = f"{symbol}|{weekly_ts}|{h.ts}|{h.direction}|{h.span}"
+        if key not in hist:
+            hist[key] = {
+                "symbol": symbol, "h4_ts": h.ts, "dir": h.direction, "span": h.span,
+                "sizes": sorted(w.span + 2 for w in confirmed), "first_seen": now_ms,
+            }
+            new += 1
+    cutoff = now_ms - 30 * 86400 * 1000
+    hist = {k: v for k, v in hist.items() if v.get("h4_ts", 0) >= cutoff}
+    return hist, new
 
 
 # ===========================================================================
@@ -560,12 +671,31 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 .noh4{padding:2px 2px 6px;color:#5d6678;font-size:12px;font-style:italic}
 .empty{grid-column:1/-1;color:var(--muted);padding:60px;text-align:center;background:var(--surface);border:1px solid var(--line);border-radius:14px}
 .foot{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);color:#5d6678;font-size:12px;display:flex;gap:18px;flex-wrap:wrap;font-family:'IBM Plex Mono',ui-monospace,monospace}
+.hdot{width:8px;height:8px;border-radius:50%;background:var(--both);flex:none}
+.live.ok .hdot{background:var(--bull)}
+.live.warn .hdot{background:var(--accent)}
+.live.bad .hdot{background:var(--bear)}
+.live.bad{color:var(--bear)}
+.nav{display:flex;gap:7px;margin-left:14px}
+.navlink{font-size:12px;color:var(--muted);text-decoration:none;border:1px solid var(--line);padding:5px 11px;border-radius:9px}
+.navlink:hover{color:var(--text);border-color:#34415c}
+.navlink.active{color:var(--accent);border-color:rgba(227,177,92,.4)}
+a.pair{text-decoration:none;color:var(--text)}
+a.pair:hover{color:var(--accent)}
+a:focus-visible,.navlink:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.hday{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.12em;color:var(--muted);margin:20px 2px 6px;padding-top:14px;border-top:1px solid var(--line)}
+.hday:first-of-type{border-top:none;padding-top:0;margin-top:4px}
+.hrow{display:flex;align-items:center;gap:10px;padding:7px 2px;border-bottom:1px solid rgba(255,255,255,.04)}
+.hsym{font-weight:700;font-size:13px;width:80px;flex:none;text-decoration:none;color:var(--text)}
+.hsym:hover{color:var(--accent)}
+.htime{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:#ccd2dd;font-variant-numeric:tabular-nums}
+.hwk{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted)}
 @media (prefers-reduced-motion:reduce){.pip{animation:none}.card{transition:none}}
 @media (max-width:520px){.bignum{font-size:42px}body{padding:0 14px 40px}}
 """
 
 
-def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=None) -> str:
+def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=None, gen_ms=0) -> str:
     results = sorted(results, key=lambda r: r.symbol)
 
     wt = {"bear": 0, "bull": 0, "both": 0}                  # modèles weekly par sens
@@ -609,7 +739,7 @@ def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=Non
         wdt = datetime.fromtimestamp(res.weekly_ts / 1000, tz=DISPLAY_TZ)
         cards.append(
             f'<div class="card"><div class="chead">'
-            f'<span class="pair">{clean}</span>'
+            f'<a class="pair" href="{tv_url(res.symbol)}" target="_blank" rel="noopener">{clean} ↗</a>'
             f'<span class="count">{len(res.weekly)} modèles</span></div>'
             f'<div class="wsub">manipulation weekly · <b>sem. du {wdt:%d/%m}</b></div>'
             f'{"".join(blocks)}</div>'
@@ -641,31 +771,95 @@ def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=Non
         f'<h2 class="sr-only">CRT Scanner : {nmodels} modèles weekly sur {npairs} paires.</h2>'
         '<div class="topbar"><div class="brand"><div class="logo">CRT</div>'
         '<div><div class="name">Scanner</div><div class="sub">Weekly · H4 confluence</div></div></div>'
-        f'<div class="live"><span class="pip"></span>maj {html.escape(stamp)}</div></div>'
+        '<div class="nav"><a class="navlink active" href="index.html">Dashboard</a>'
+        '<a class="navlink" href="history.html">Historique</a></div>'
+        f'<div class="live" id="live"><span class="hdot"></span><span id="health">maj {html.escape(stamp)}</span></div></div>'
         f'<div class="summary"><div class="bignum">{npairs}<span>paires actives</span></div>'
         f'<div class="tallies">{tallies}</div></div>'
         f'<div class="grid">{grid}</div>'
         f'<div class="foot"><span>&#8635; auto {refresh_s}s</span><span>{html.escape(win_txt)}</span>'
         f'{skip_txt}<span>{nmodels} modèles weekly</span><span>source {html.escape(source_name)}</span></div>'
+        '</div>'
+        f'<script>(function(){{var g={gen_ms};var L=document.getElementById("live"),H=document.getElementById("health");'
+        'function u(){var m=Math.floor((Date.now()-g)/60000);'
+        'H.textContent=m<1?"à l\\u2019instant":"il y a "+m+" min";'
+        'L.className="live "+(m<35?"ok":(m<70?"warn":"bad"));}'
+        'if(g>0){u();setInterval(u,30000);}else{L.className="live ok";}})();</script>'
+        '</body></html>'
+    )
+
+
+def render_history(hist: dict, stamp, source_name, refresh_s=300) -> str:
+    recs = sorted(hist.values(), key=lambda r: r["h4_ts"], reverse=True)
+    days: dict = {}
+    for r in recs:
+        dt = datetime.fromtimestamp(r["h4_ts"] / 1000, tz=DISPLAY_TZ)
+        days.setdefault(dt.strftime("%Y-%m-%d"), []).append((r, dt))
+
+    sections = []
+    for dkey in sorted(days, reverse=True):
+        ddt = days[dkey][0][1]
+        label = f"{_JOURS_FR[ddt.weekday()]} {ddt:%d/%m/%Y}"
+        rows = []
+        for r, dt in days[dkey]:
+            dcls, dlab = _DIR[r["dir"]]
+            sym = html.escape(r["symbol"].split(":")[-1])
+            hn = r["span"] + 2
+            hext = " ext" if r["span"] > 1 else ""
+            wsz = ", ".join(f"{n}C" for n in r["sizes"])
+            rows.append(
+                f'<div class="hrow"><span class="tag {dcls}"><span class="dot"></span>{dlab}</span>'
+                f'<a class="hsym" href="{tv_url(r["symbol"])}" target="_blank" rel="noopener">{sym}</a>'
+                f'<span class="htime">{dt:%H:%M}</span>'
+                f'<span class="hsize{hext}">{hn}C</span>'
+                f'<span class="hwk">Weekly {wsz}</span></div>'
+            )
+        sections.append(f'<div class="hday">{label} · {len(days[dkey])}</div>{"".join(rows)}')
+
+    body = "".join(sections) or '<div class="empty">Historique vide pour le moment.</div>'
+    return (
+        '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<meta http-equiv="refresh" content="{refresh_s}">'
+        '<title>CRT Scanner · Historique</title>'
+        '<link rel="preconnect" href="https://fonts.googleapis.com">'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
+        'family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">'
+        f'<style>{_DASH_CSS}</style></head><body><div class="wrap">'
+        f'<h2 class="sr-only">Historique CRT : {len(recs)} setups passés.</h2>'
+        '<div class="topbar"><div class="brand"><div class="logo">CRT</div>'
+        '<div><div class="name">Scanner</div><div class="sub">Historique des setups</div></div></div>'
+        '<div class="nav"><a class="navlink" href="index.html">Dashboard</a>'
+        '<a class="navlink active" href="history.html">Historique</a></div>'
+        f'<div class="live"><span class="hdot"></span>maj {html.escape(stamp)}</div></div>'
+        f'<div class="summary"><div class="bignum">{len(recs)}<span>setups archivés (30 j)</span></div></div>'
+        f'<div>{body}</div>'
+        f'<div class="foot"><span>{len(days)} jours</span><span>source {html.escape(source_name)}</span></div>'
         '</div></body></html>'
     )
 
 
 def serve_dashboard(source, symbols, require_align, window, port, tg,
-                    seen_path, interval_min, latest_only=False, skip=None):
-    state = {"matches": [], "stamp": "scan en cours…", "error": None}
+                    seen_path, interval_min, latest_only=False, skip=None,
+                    history_file=None, state_file=None, recap_hour=None):
+    state = {"matches": [], "stamp": "scan en cours…", "hist": {}, "gen_ms": 0}
 
     def loop():
         while True:
             try:
                 ms = scan(source, symbols, require_align, latest_only, window, skip)
+                now_ms = int(time.time() * 1000)
                 state["matches"] = ms
+                state["gen_ms"] = now_ms
                 state["stamp"] = datetime.now(tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
-                state["error"] = None
+                hist, _ = update_history(load_json(history_file), ms, now_ms)
+                save_json(history_file, hist)
+                state["hist"] = hist
                 if tg:
                     send_new_alerts(ms, tg, seen_path)
+                    maybe_send_recap(ms, tg, state_file, recap_hour, state["stamp"])
             except Exception as exc:                       # un scan raté ne tue pas le serveur
-                state["error"] = str(exc)
                 print(f"[serve] scan erreur : {exc}", file=sys.stderr)
             time.sleep(max(1, interval_min) * 60)
 
@@ -673,8 +867,12 @@ def serve_dashboard(source, symbols, require_align, window, port, tg,
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            page = render_dashboard(state["matches"], state["stamp"], window,
-                                    source.name, refresh_s=60, skip=skip)
+            path = self.path.split("?")[0]
+            if path.startswith("/history"):
+                page = render_history(state["hist"], state["stamp"], source.name, refresh_s=60)
+            else:
+                page = render_dashboard(state["matches"], state["stamp"], window,
+                                        source.name, refresh_s=60, skip=skip, gen_ms=state["gen_ms"])
             body = page.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -733,6 +931,12 @@ def main() -> None:
     p.add_argument("--skip-session", type=int, nargs=2, metavar=("DEBUT", "FIN"), default=None,
                    help="exclut les bougies H4 ouvrant dans [DEBUT,FIN) (heures, fuseau --tz). "
                         "Gère le passage de minuit. Ex : --skip-session 22 7 (session asiatique).")
+    p.add_argument("--history-file", default=".crt_history.json",
+                   help="fichier d'historique des setups (pour la page Historique)")
+    p.add_argument("--state-file", default=".crt_state.json",
+                   help="fichier d'état (date du dernier récap quotidien…)")
+    p.add_argument("--daily-recap", type=int, metavar="HEURE", default=None,
+                   help="envoie un récap Telegram 1x/jour à partir de cette heure (fuseau --tz). Ex : --daily-recap 8")
     p.add_argument("-o", "--out", help="exporte les setups en CSV")
     p.add_argument("--html", metavar="PATH",
                    help="génère un dashboard HTML (snapshot) puis quitte")
@@ -781,22 +985,34 @@ def main() -> None:
     skip = tuple(args.skip_session) if args.skip_session else None
 
     if args.html:
+        now_ms = int(time.time() * 1000)
         stamp = datetime.now(tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
         results = scan(source, symbols, args.align, args.latest_only, args.crt_window, skip)
         with open(args.html, "w", encoding="utf-8") as f:
-            f.write(render_dashboard(results, stamp, args.crt_window, source.name, skip=skip))
+            f.write(render_dashboard(results, stamp, args.crt_window, source.name,
+                                     skip=skip, gen_ms=now_ms))
+        # Historique : page history.html à côté du dashboard
+        hist, n_new = update_history(load_json(args.history_file), results, now_ms)
+        save_json(args.history_file, hist)
+        hist_path = os.path.join(os.path.dirname(args.html) or ".", "history.html")
+        with open(hist_path, "w", encoding="utf-8") as f:
+            f.write(render_history(hist, stamp, source.name))
         nmodels = sum(len(r.weekly) for r in results)
-        msg = f"📊 dashboard écrit → {args.html}  ({len(results)} paires · {nmodels} modèles weekly)"
+        msg = (f"📊 dashboard + historique écrits ({len(results)} paires · {nmodels} modèles · "
+               f"{n_new} nouveau(x) en historique)")
         if tg:
             sent, _ = send_new_alerts(results, tg, args.seen_file)
-            msg += f" · 📨 {sent} nouvelle(s) alerte(s)"
+            if maybe_send_recap(results, tg, args.state_file, args.daily_recap, stamp):
+                msg += " · 🗞️ récap envoyé"
+            msg += f" · 📨 {sent} alerte(s)"
         print(msg)
         return
 
     # Dashboard web auto-actualisé (tourne en continu, idéal 24/7).
     if args.serve:
         serve_dashboard(source, symbols, args.align, args.crt_window, args.serve, tg,
-                        args.seen_file, args.watch or 30, args.latest_only, skip)
+                        args.seen_file, args.watch or 30, args.latest_only, skip,
+                        args.history_file, args.state_file, args.daily_recap)
         return
 
     if not args.watch:
