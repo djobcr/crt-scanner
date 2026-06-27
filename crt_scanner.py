@@ -431,13 +431,6 @@ def send_new_alerts(matches: list["Match"], tg, seen_path) -> int:
 _DIR = {"bull": ("bull", "LONG"), "bear": ("bear", "SHORT"), "both": ("both", "OUTSIDE")}
 
 
-def _model_chip(span: int) -> str:
-    n = span + 2
-    if span == 1:
-        return '<span class="model" title="3 candle model classique">3C</span>'
-    return f'<span class="model ext" title="modèle étendu · {n} bougies">{n}C</span>'
-
-
 _DASH_CSS = """
 :root{--ground:#0b0e15;--surface:#131826;--surface-2:#1b2233;--line:#242d40;
 --text:#e7eaf0;--muted:#8891a4;--accent:#e3b15c;--bull:#2ebd85;--bear:#e8585e;--both:#98a1b3}
@@ -481,8 +474,13 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 .tag.bear{color:var(--bear)}.tag.bear .dot{background:var(--bear)}
 .tag.both{color:var(--both)}.tag.both .dot{background:var(--both)}
 .when{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:#ccd2dd;font-variant-numeric:tabular-nums}
-.model{margin-left:auto;font-size:11px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-weight:500;padding:2px 8px;border-radius:6px;background:var(--surface-2);color:var(--muted)}
-.model.ext{background:rgba(227,177,92,.14);color:var(--accent)}
+.grp{display:flex;align-items:center;gap:8px;margin:0 7px;padding:11px 0 4px;border-top:1px solid rgba(255,255,255,.07)}
+.grp.first{border-top:none;padding-top:4px}
+.gchip{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:6px;background:var(--surface-2);color:var(--muted)}
+.gchip.ext{background:rgba(227,177,92,.14);color:var(--accent)}
+.glabel{font-size:10px;text-transform:uppercase;letter-spacing:.11em;color:var(--muted)}
+.gcount{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted)}
+.grp + .row{border-top:none}
 .empty{grid-column:1/-1;color:var(--muted);padding:60px;text-align:center;background:var(--surface);border:1px solid var(--line);border-radius:14px}
 .foot{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);color:#5d6678;font-size:12px;display:flex;gap:18px;flex-wrap:wrap;font-family:'IBM Plex Mono',ui-monospace,monospace}
 @media (prefers-reduced-motion:reduce){.pip{animation:none}.card{transition:none}}
@@ -501,27 +499,43 @@ def render_dashboard(matches, stamp, window, source_name, refresh_s=60) -> str:
 
     cards = []
     for sym, ms in sorted(by_sym.items()):
-        ms.sort(key=lambda x: x.h4_ts, reverse=True)
         wcls, wlab = _DIR[ms[0].weekly.direction]
-        rows = []
-        for j, m in enumerate(ms):
-            dcls, dlab = _DIR[m.h4.direction]
-            dt = datetime.fromtimestamp(m.h4_ts / 1000, tz=DISPLAY_TZ)
-            when = f"{_JOURS_FR[dt.weekday()]} {dt:%d/%m · %H:%M}"
-            fresh = " fresh" if j == 0 else ""
-            rows.append(
-                f'<div class="row{fresh}">'
-                f'<span class="tag {dcls}"><span class="dot"></span>{dlab}</span>'
-                f'<span class="when">{html.escape(when)}</span>'
-                f'{_model_chip(m.h4.span)}</div>'
+        latest_ts = max(m.h4_ts for m in ms)
+
+        groups: dict[int, list] = {}                       # regroupe par modèle (span)
+        for m in ms:
+            groups.setdefault(m.h4.span, []).append(m)
+
+        blocks = []
+        for gi, span in enumerate(sorted(groups)):          # classiques (3C) d'abord
+            n = span + 2
+            ext = " ext" if span > 1 else ""
+            first = " first" if gi == 0 else ""
+            gms = sorted(groups[span], key=lambda x: x.h4_ts, reverse=True)
+            rows = []
+            for m in gms:
+                dcls, dlab = _DIR[m.h4.direction]
+                dt = datetime.fromtimestamp(m.h4_ts / 1000, tz=DISPLAY_TZ)
+                when = f"{_JOURS_FR[dt.weekday()]} {dt:%d/%m · %H:%M}"
+                fresh = " fresh" if m.h4_ts == latest_ts else ""
+                rows.append(
+                    f'<div class="row{fresh}">'
+                    f'<span class="tag {dcls}"><span class="dot"></span>{dlab}</span>'
+                    f'<span class="when">{html.escape(when)}</span></div>'
+                )
+            blocks.append(
+                f'<div class="grp{first}"><span class="gchip{ext}">{n}C</span>'
+                f'<span class="glabel">modèle {n} bougies</span>'
+                f'<span class="gcount">{len(gms)}</span></div>{"".join(rows)}'
             )
+
         clean = html.escape(sym.split(":")[-1])
         cards.append(
             f'<div class="card {wcls}"><div class="chead">'
             f'<span class="pair">{clean}</span>'
             f'<span class="wpill {wcls}">Weekly {wlab}</span>'
             f'<span class="count">{len(ms)}</span></div>'
-            f'{"".join(rows)}</div>'
+            f'{"".join(blocks)}</div>'
         )
 
     grid = "".join(cards) or '<div class="empty">Aucun setup CRT Weekly + H4 pour le moment.</div>'
