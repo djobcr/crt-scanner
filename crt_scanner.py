@@ -428,11 +428,66 @@ def send_new_alerts(matches: list["Match"], tg, seen_path) -> int:
 # ===========================================================================
 # 6b) Dashboard web (visuel) — lib standard, aucune dépendance
 # ===========================================================================
-_DIR_CSS = {"bull": ("#16c784", "LONG"), "bear": ("#ea3943", "SHORT"), "both": ("#8a8f98", "OUTSIDE")}
+_DIR = {"bull": ("bull", "LONG"), "bear": ("bear", "SHORT"), "both": ("both", "OUTSIDE")}
 
 
-def _model_label(span: int) -> str:
-    return "3 candle model" if span == 1 else f"{span + 2} candle model · étendu"
+def _model_chip(span: int) -> str:
+    n = span + 2
+    if span == 1:
+        return '<span class="model" title="3 candle model classique">3C</span>'
+    return f'<span class="model ext" title="modèle étendu · {n} bougies">{n}C</span>'
+
+
+_DASH_CSS = """
+:root{--ground:#0b0e15;--surface:#131826;--surface-2:#1b2233;--line:#242d40;
+--text:#e7eaf0;--muted:#8891a4;--accent:#e3b15c;--bull:#2ebd85;--bear:#e8585e;--both:#98a1b3}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,-apple-system,Segoe UI,sans-serif;-webkit-font-smoothing:antialiased;padding:0 20px 48px;line-height:1.5}
+.wrap{max-width:1180px;margin:0 auto}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+.topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:16px 0 15px;margin-bottom:22px;background:var(--ground);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:11px}
+.logo{width:36px;height:36px;border-radius:10px;background:linear-gradient(150deg,#e6bd6a,#c89a42);color:#1c1407;font-weight:800;font-size:13px;display:grid;place-items:center;letter-spacing:-.3px}
+.name{font-weight:700;font-size:16px;letter-spacing:-.2px}
+.sub{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.16em;margin-top:1px}
+.live{margin-left:auto;display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;font-family:'IBM Plex Mono',ui-monospace,monospace}
+.pip{width:8px;height:8px;border-radius:50%;background:var(--bull);animation:pulse 2.4s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(46,189,133,.5)}70%{box-shadow:0 0 0 7px rgba(46,189,133,0)}100%{box-shadow:0 0 0 0 rgba(46,189,133,0)}}
+.summary{display:flex;align-items:flex-end;gap:26px;flex-wrap:wrap;margin-bottom:24px}
+.bignum{font-size:52px;font-weight:800;letter-spacing:-2px;line-height:.85;font-variant-numeric:tabular-nums}
+.bignum span{font-size:14px;font-weight:500;color:var(--muted);letter-spacing:0;margin-left:10px}
+.tallies{display:flex;gap:8px;flex-wrap:wrap}
+.tally{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:7px 12px;font-size:13px;color:var(--muted);font-family:'IBM Plex Mono',ui-monospace,monospace}
+.tally b{color:var(--text);font-weight:600}
+.sw{width:9px;height:9px;border-radius:3px}
+.sw.bull{background:var(--bull)}.sw.bear{background:var(--bear)}.sw.both{background:var(--both)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.card{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:15px 16px 7px;overflow:hidden;transition:transform .15s ease,border-color .15s ease}
+.card:hover{transform:translateY(-2px);border-color:#34415c}
+.card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
+.card.bull::before{background:var(--bull)}.card.bear::before{background:var(--bear)}.card.both::before{background:var(--both)}
+.chead{display:flex;align-items:center;gap:10px;margin-bottom:6px;padding-left:7px}
+.pair{font-size:19px;font-weight:700;letter-spacing:-.3px}
+.wpill{font-size:10px;font-weight:700;letter-spacing:.09em;padding:4px 9px;border-radius:20px;text-transform:uppercase}
+.wpill.bull{background:rgba(46,189,133,.14);color:var(--bull)}
+.wpill.bear{background:rgba(232,88,94,.14);color:var(--bear)}
+.wpill.both{background:rgba(152,161,179,.14);color:var(--both)}
+.count{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12px;color:var(--muted);background:var(--surface-2);border-radius:8px;padding:3px 9px}
+.row{display:flex;align-items:center;gap:10px;padding:8px 7px;border-top:1px solid rgba(255,255,255,.045)}
+.row.fresh{background:linear-gradient(90deg,rgba(227,177,92,.07),transparent)}
+.tag{font-size:11px;font-weight:700;letter-spacing:.04em;width:64px;flex:none;display:flex;align-items:center;gap:7px}
+.tag .dot{width:7px;height:7px;border-radius:50%;flex:none}
+.tag.bull{color:var(--bull)}.tag.bull .dot{background:var(--bull)}
+.tag.bear{color:var(--bear)}.tag.bear .dot{background:var(--bear)}
+.tag.both{color:var(--both)}.tag.both .dot{background:var(--both)}
+.when{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:#ccd2dd;font-variant-numeric:tabular-nums}
+.model{margin-left:auto;font-size:11px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-weight:500;padding:2px 8px;border-radius:6px;background:var(--surface-2);color:var(--muted)}
+.model.ext{background:rgba(227,177,92,.14);color:var(--accent)}
+.empty{grid-column:1/-1;color:var(--muted);padding:60px;text-align:center;background:var(--surface);border:1px solid var(--line);border-radius:14px}
+.foot{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);color:#5d6678;font-size:12px;display:flex;gap:18px;flex-wrap:wrap;font-family:'IBM Plex Mono',ui-monospace,monospace}
+@media (prefers-reduced-motion:reduce){.pip{animation:none}.card{transition:none}}
+@media (max-width:520px){.bignum{font-size:42px}body{padding:0 14px 40px}}
+"""
 
 
 def render_dashboard(matches, stamp, window, source_name, refresh_s=60) -> str:
@@ -440,63 +495,66 @@ def render_dashboard(matches, stamp, window, source_name, refresh_s=60) -> str:
     for m in matches:
         by_sym.setdefault(m.symbol, []).append(m)
 
+    tally = {"bear": 0, "bull": 0, "both": 0}
+    for m in matches:
+        tally[m.h4.direction] = tally.get(m.h4.direction, 0) + 1
+
     cards = []
     for sym, ms in sorted(by_sym.items()):
         ms.sort(key=lambda x: x.h4_ts, reverse=True)
-        w = ms[0].weekly
-        wcol, wlab = _DIR_CSS[w.direction]
+        wcls, wlab = _DIR[ms[0].weekly.direction]
         rows = []
-        for m in ms:
-            hcol, hlab = _DIR_CSS[m.h4.direction]
+        for j, m in enumerate(ms):
+            dcls, dlab = _DIR[m.h4.direction]
             dt = datetime.fromtimestamp(m.h4_ts / 1000, tz=DISPLAY_TZ)
-            when = f"{_JOURS_FR[dt.weekday()]} {dt:%d/%m %H:%M}"
-            badge = "" if m.h4.span == 1 else (
-                f'<span class="ext">{m.h4.span + 2}c</span>')
+            when = f"{_JOURS_FR[dt.weekday()]} {dt:%d/%m · %H:%M}"
+            fresh = " fresh" if j == 0 else ""
             rows.append(
-                f'<div class="row"><span class="dot" style="background:{hcol}"></span>'
-                f'<span class="hl" style="color:{hcol}">{hlab}</span>'
+                f'<div class="row{fresh}">'
+                f'<span class="tag {dcls}"><span class="dot"></span>{dlab}</span>'
                 f'<span class="when">{html.escape(when)}</span>'
-                f'<span class="model">{html.escape(_model_label(m.h4.span))}</span>{badge}</div>'
+                f'{_model_chip(m.h4.span)}</div>'
             )
-        clean_sym = html.escape(sym.split(":")[-1])
+        clean = html.escape(sym.split(":")[-1])
         cards.append(
-            f'<div class="card"><div class="chead">'
-            f'<span class="sym">{clean_sym}</span>'
-            f'<span class="wbias" style="background:{wcol}">Weekly {wlab}</span>'
-            f'<span class="cnt">{len(ms)}</span></div>{"".join(rows)}</div>'
+            f'<div class="card {wcls}"><div class="chead">'
+            f'<span class="pair">{clean}</span>'
+            f'<span class="wpill {wcls}">Weekly {wlab}</span>'
+            f'<span class="count">{len(ms)}</span></div>'
+            f'{"".join(rows)}</div>'
         )
 
-    grid = "".join(cards) or '<div class="empty">Aucun setup CRT W+H4 pour le moment.</div>'
-    win_txt = f"fenêtre {window} bougie(s)" if window > 1 else "modèle strict 3 bougies"
-    return f"""<!doctype html><html lang="fr"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="{refresh_s}">
-<title>CRT Scanner</title><style>
-*{{box-sizing:border-box;margin:0;padding:0}}
-body{{background:#0d0f14;color:#e6e8eb;font:15px/1.5 -apple-system,Segoe UI,Roboto,sans-serif;padding:24px}}
-header{{display:flex;flex-wrap:wrap;align-items:baseline;gap:12px;margin-bottom:20px}}
-h1{{font-size:20px;font-weight:700;letter-spacing:.3px}}
-.meta{{color:#8a8f98;font-size:13px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px}}
-.card{{background:#161a22;border:1px solid #232936;border-radius:14px;padding:14px 16px}}
-.chead{{display:flex;align-items:center;gap:10px;margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #232936}}
-.sym{{font-size:17px;font-weight:700}}
-.wbias{{font-size:11px;font-weight:700;color:#0d0f14;padding:3px 8px;border-radius:20px;letter-spacing:.4px}}
-.cnt{{margin-left:auto;color:#8a8f98;font-size:13px}}
-.row{{display:flex;align-items:center;gap:8px;padding:5px 0}}
-.dot{{width:8px;height:8px;border-radius:50%;flex:none}}
-.hl{{font-weight:700;font-size:13px;width:58px;flex:none}}
-.when{{color:#c5c9d0;font-size:13px;width:96px;flex:none}}
-.model{{color:#8a8f98;font-size:12px}}
-.ext{{margin-left:auto;background:#2a2f3c;color:#c5c9d0;font-size:11px;font-weight:700;padding:1px 7px;border-radius:6px}}
-.empty{{color:#8a8f98;padding:40px;text-align:center}}
-footer{{margin-top:22px;color:#5a606b;font-size:12px}}
-</style></head><body>
-<header><h1>🎯 CRT Scanner · Weekly + H4</h1>
-<span class="meta">{len(matches)} setup(s) · {win_txt} · source {html.escape(source_name)} · {html.escape(stamp)}</span></header>
-<div class="grid">{grid}</div>
-<footer>Actualisation auto toutes les {refresh_s}s · alertes alignées Weekly+H4</footer>
-</body></html>"""
+    grid = "".join(cards) or '<div class="empty">Aucun setup CRT Weekly + H4 pour le moment.</div>'
+    win_txt = f"fenêtre {window} bougies" if window > 1 else "modèle strict"
+
+    def _tchip(cls, lab, n):
+        return f'<span class="tally"><span class="sw {cls}"></span><b>{n}</b> {lab}</span>'
+
+    tallies = (_tchip("bear", "short", tally.get("bear", 0))
+               + _tchip("bull", "long", tally.get("bull", 0))
+               + _tchip("both", "outside", tally.get("both", 0)))
+
+    return (
+        '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<meta http-equiv="refresh" content="{refresh_s}">'
+        '<title>CRT Scanner · Weekly + H4</title>'
+        '<link rel="preconnect" href="https://fonts.googleapis.com">'
+        '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
+        '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
+        'family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">'
+        f'<style>{_DASH_CSS}</style></head><body><div class="wrap">'
+        f'<h2 class="sr-only">CRT Scanner : {len(matches)} setups Weekly+H4 alignés sur {len(by_sym)} paires.</h2>'
+        '<div class="topbar"><div class="brand"><div class="logo">CRT</div>'
+        '<div><div class="name">Scanner</div><div class="sub">Weekly · H4 confluence</div></div></div>'
+        f'<div class="live"><span class="pip"></span>maj {html.escape(stamp)}</div></div>'
+        f'<div class="summary"><div class="bignum">{len(matches)}<span>setups alignés</span></div>'
+        f'<div class="tallies">{tallies}</div></div>'
+        f'<div class="grid">{grid}</div>'
+        f'<div class="foot"><span>&#8635; auto {refresh_s}s</span><span>{html.escape(win_txt)}</span>'
+        f'<span>source {html.escape(source_name)}</span><span>{len(by_sym)} paires</span></div>'
+        '</div></body></html>'
+    )
 
 
 def serve_dashboard(source, symbols, require_align, window, port, tg,
