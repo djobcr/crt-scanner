@@ -1,0 +1,92 @@
+name: CRT scanner
+
+# Scanner CRT Weekly+H4, 100% gratuit et serverless :
+#   - GitHub Actions exécute le scan toutes les 30 min (cron) -> alertes Telegram
+#   - le dashboard HTML est régénéré et publié sur GitHub Pages (URL fixe)
+# Source TradingView OANDA en ANONYME (pas de login -> pas de captcha) : fiable
+# sur les runners cloud. (Le login tvDatafeed, lui, casse sur IP datacenter.)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"   # toutes les 30 min (UTC). GitHub peut décaler de
+                             # quelques minutes : sans importance, le scan couvre
+                             # toute la semaine en cours.
+  workflow_dispatch:         # bouton "Run workflow" pour lancer à la demande
+  push:
+    branches: [main]         # relance aussi à chaque mise à jour du code
+
+# Droits nécessaires au déploiement GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: crt-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install pandas tradingview-datafeed
+
+      # Garde la dédup des alertes d'une exécution à l'autre (sinon ré-alertes).
+      - name: Restaure la dédup des alertes
+        uses: actions/cache@v4
+        with:
+          path: .crt_seen.json
+          key: crt-seen-${{ github.run_id }}
+          restore-keys: crt-seen-
+
+      - name: Scan + alertes Telegram + dashboard
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          mkdir -p public
+          python crt_scanner.py --align --crt-window 5 --telegram --html public/index.html
+
+      # Publication du dashboard sur GitHub Pages
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+      - id: deploy
+        uses: actions/deploy-pages@v4
+
+# ---------------------------------------------------------------------------
+# MISE EN PLACE (une seule fois) :
+#
+#  1. Crée un compte GitHub (gratuit) si tu n'en as pas : https://github.com/signup
+#
+#  2. Crée un nouveau dépôt (repo), ex. "crt-scanner".
+#     Mets-y crt_scanner.py ET ce fichier dans : .github/workflows/crt.yml
+#     (le chemin exact compte : dossier .github/workflows/)
+#
+#  3. Settings > Secrets and variables > Actions > "New repository secret" :
+#        - TELEGRAM_TOKEN     = <ton token BotFather>   (NE JAMAIS mettre en clair
+#        - TELEGRAM_CHAT_ID   = <ton chat id>            dans un fichier du repo !)
+#
+#  4. Settings > Pages > "Build and deployment" > Source : choisis "GitHub Actions".
+#
+#  5. Onglet Actions > active les workflows > "Run workflow" pour un 1er lancement.
+#     L'URL de ton dashboard s'affiche ensuite dans Settings > Pages
+#     (du type https://TON-PSEUDO.github.io/crt-scanner/).
+#
+# NOTES :
+#  - Le dashboard est PUBLIC (repo public). Les secrets Telegram, eux, restent
+#    privés (jamais exposés). Pour un dashboard privé il faut GitHub Pro.
+#  - GitHub désactive le cron d'un repo inactif > 60 jours : un "Run workflow"
+#    manuel le réactive.
+#  - Tout se pilote depuis l'onglet Actions (lancer, voir les logs, historique).
+# ---------------------------------------------------------------------------
