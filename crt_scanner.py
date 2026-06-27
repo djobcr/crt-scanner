@@ -459,7 +459,9 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 .card:hover{transform:translateY(-2px);border-color:#34415c}
 .card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
 .card.bull::before{background:var(--bull)}.card.bear::before{background:var(--bear)}.card.both::before{background:var(--both)}
-.chead{display:flex;align-items:center;gap:10px;margin-bottom:6px;padding-left:7px}
+.chead{display:flex;align-items:center;gap:10px;margin-bottom:3px;padding-left:7px}
+.wsub{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted);padding-left:7px;margin-bottom:4px}
+.wsub b{color:#c2c8d4;font-weight:500}
 .pair{font-size:19px;font-weight:700;letter-spacing:-.3px}
 .wpill{font-size:10px;font-weight:700;letter-spacing:.09em;padding:4px 9px;border-radius:20px;text-transform:uppercase}
 .wpill.bull{background:rgba(46,189,133,.14);color:var(--bull)}
@@ -530,11 +532,13 @@ def render_dashboard(matches, stamp, window, source_name, refresh_s=60) -> str:
             )
 
         clean = html.escape(sym.split(":")[-1])
+        wdt = datetime.fromtimestamp(ms[0].weekly_ts / 1000, tz=DISPLAY_TZ)
         cards.append(
             f'<div class="card {wcls}"><div class="chead">'
             f'<span class="pair">{clean}</span>'
             f'<span class="wpill {wcls}">Weekly {wlab}</span>'
             f'<span class="count">{len(ms)}</span></div>'
+            f'<div class="wsub">manipulation weekly · <b>sem. du {wdt:%d/%m}</b></div>'
             f'{"".join(blocks)}</div>'
         )
 
