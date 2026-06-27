@@ -362,8 +362,18 @@ class SymResult:
     h4s: list         # list[H4Hit] : tous les CRT H4 de la semaine en cours
 
 
+def _in_skip(hour: int, skip) -> bool:
+    """True si `hour` (0-23) est dans la plage [start, end) à exclure. Gère minuit (22->7)."""
+    if not skip:
+        return False
+    s, e = skip
+    if s == e:
+        return False
+    return s <= hour < e if s < e else (hour >= s or hour < e)
+
+
 def scan(source: Source, symbols: list[str], require_align: bool = True,
-         latest_only: bool = False, window: int = 1) -> list[SymResult]:
+         latest_only: bool = False, window: int = 1, skip=None) -> list[SymResult]:
     results: list[SymResult] = []
     total = len(symbols)
 
@@ -377,6 +387,9 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
 
             hts, hh, hl, hc = source.ohlcv(symbol, "4h", 80)
             idxs = [i for i in range(1, len(hts)) if week_start <= hts[i] < week_end]
+            if skip:                                 # retire les H4 de la session exclue
+                idxs = [i for i in idxs
+                        if not _in_skip(datetime.fromtimestamp(hts[i] / 1000, tz=DISPLAY_TZ).hour, skip)]
             if latest_only and idxs:
                 idxs = [idxs[-1]]
 
@@ -384,6 +397,8 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
             seen_pair = set()                       # 1 ligne par (bougie H4, sens) : modèle le + court
             for i in idxs:
                 for crt in crt_all(hh, hl, hc, i, window):
+                    if crt.direction == "both":     # OUTSIDE H4 exclus (sweep des 2 côtés)
+                        continue
                     key = (hts[i], crt.direction)
                     if key in seen_pair:
                         continue
@@ -434,11 +449,11 @@ def results_to_df(results: list[SymResult]) -> pd.DataFrame:
 
 
 def run_once(source, symbols, require_align, out=None, tg=None, seen_path=None,
-             latest_only=False, window=1):
+             latest_only=False, window=1, skip=None):
     stamp = datetime.now(tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
     win_txt = f" — fenêtre {window} bougie(s)" if window > 1 else ""
     print(f"\n=== Scan CRT Weekly+H4 — {len(symbols)} symboles — source {source.name}{win_txt} — {stamp} ===")
-    results = scan(source, symbols, require_align, latest_only, window)
+    results = scan(source, symbols, require_align, latest_only, window, skip)
 
     df = results_to_df(results)
     if df.empty:
@@ -550,7 +565,7 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 """
 
 
-def render_dashboard(results, stamp, window, source_name, refresh_s=60) -> str:
+def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=None) -> str:
     results = sorted(results, key=lambda r: r.symbol)
 
     wt = {"bear": 0, "bull": 0, "both": 0}                  # modèles weekly par sens
@@ -602,6 +617,7 @@ def render_dashboard(results, stamp, window, source_name, refresh_s=60) -> str:
 
     grid = "".join(cards) or '<div class="empty">Aucun CRT weekly pour le moment.</div>'
     win_txt = f"fenêtre {window} bougies" if window > 1 else "modèle strict"
+    skip_txt = f"<span>session {skip[0]:02d}h–{skip[1]:02d}h exclue</span>" if skip else ""
     npairs = len(results)
     nmodels = sum(len(r.weekly) for r in results)
 
@@ -630,19 +646,19 @@ def render_dashboard(results, stamp, window, source_name, refresh_s=60) -> str:
         f'<div class="tallies">{tallies}</div></div>'
         f'<div class="grid">{grid}</div>'
         f'<div class="foot"><span>&#8635; auto {refresh_s}s</span><span>{html.escape(win_txt)}</span>'
-        f'<span>{nmodels} modèles weekly</span><span>source {html.escape(source_name)}</span></div>'
+        f'{skip_txt}<span>{nmodels} modèles weekly</span><span>source {html.escape(source_name)}</span></div>'
         '</div></body></html>'
     )
 
 
 def serve_dashboard(source, symbols, require_align, window, port, tg,
-                    seen_path, interval_min, latest_only=False):
+                    seen_path, interval_min, latest_only=False, skip=None):
     state = {"matches": [], "stamp": "scan en cours…", "error": None}
 
     def loop():
         while True:
             try:
-                ms = scan(source, symbols, require_align, latest_only, window)
+                ms = scan(source, symbols, require_align, latest_only, window, skip)
                 state["matches"] = ms
                 state["stamp"] = datetime.now(tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
                 state["error"] = None
@@ -658,7 +674,7 @@ def serve_dashboard(source, symbols, require_align, window, port, tg,
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             page = render_dashboard(state["matches"], state["stamp"], window,
-                                    source.name, refresh_s=60)
+                                    source.name, refresh_s=60, skip=skip)
             body = page.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -714,6 +730,9 @@ def main() -> None:
     p.add_argument("--crt-window", type=int, default=1, metavar="N",
                    help="nb de bougies en arrière où chercher la bougie 'range' pour le "
                         "sweep+reclaim (1 = modèle strict 2 bougies ; ex. 5 = multi-bougies)")
+    p.add_argument("--skip-session", type=int, nargs=2, metavar=("DEBUT", "FIN"), default=None,
+                   help="exclut les bougies H4 ouvrant dans [DEBUT,FIN) (heures, fuseau --tz). "
+                        "Gère le passage de minuit. Ex : --skip-session 22 7 (session asiatique).")
     p.add_argument("-o", "--out", help="exporte les setups en CSV")
     p.add_argument("--html", metavar="PATH",
                    help="génère un dashboard HTML (snapshot) puis quitte")
@@ -759,11 +778,13 @@ def main() -> None:
 
     # Dashboard HTML (snapshot) : un scan, on écrit le fichier, alertes éventuelles, puis quitte.
     # Idéal serverless (GitHub Actions) : un seul passage fait dashboard + Telegram.
+    skip = tuple(args.skip_session) if args.skip_session else None
+
     if args.html:
         stamp = datetime.now(tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
-        results = scan(source, symbols, args.align, args.latest_only, args.crt_window)
+        results = scan(source, symbols, args.align, args.latest_only, args.crt_window, skip)
         with open(args.html, "w", encoding="utf-8") as f:
-            f.write(render_dashboard(results, stamp, args.crt_window, source.name))
+            f.write(render_dashboard(results, stamp, args.crt_window, source.name, skip=skip))
         nmodels = sum(len(r.weekly) for r in results)
         msg = f"📊 dashboard écrit → {args.html}  ({len(results)} paires · {nmodels} modèles weekly)"
         if tg:
@@ -775,18 +796,18 @@ def main() -> None:
     # Dashboard web auto-actualisé (tourne en continu, idéal 24/7).
     if args.serve:
         serve_dashboard(source, symbols, args.align, args.crt_window, args.serve, tg,
-                        args.seen_file, args.watch or 30, args.latest_only)
+                        args.seen_file, args.watch or 30, args.latest_only, skip)
         return
 
     if not args.watch:
         run_once(source, symbols, args.align, args.out, tg, args.seen_file,
-                 args.latest_only, args.crt_window)
+                 args.latest_only, args.crt_window, skip)
         return
 
     try:
         while True:
             run_once(source, symbols, args.align, args.out, tg, args.seen_file,
-                     args.latest_only, args.crt_window)
+                     args.latest_only, args.crt_window, skip)
             print(f"\n⏳ prochain scan dans {args.watch} min…")
             time.sleep(args.watch * 60)
     except KeyboardInterrupt:

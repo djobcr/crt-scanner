@@ -54,7 +54,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           mkdir -p public
-          python crt_scanner.py --align --crt-window 5 --telegram --html public/index.html
+          python crt_scanner.py --crt-window 5 --skip-session 22 7 --telegram --html public/index.html
 
       # Publication du dashboard sur GitHub Pages
       - uses: actions/configure-pages@v5
