@@ -124,10 +124,41 @@ def detect_crt(highs, lows, closes, window: int = 1) -> CRT | None:
     return crt_at(highs, lows, closes, len(closes) - 1, window)
 
 
+def crt_all(highs, lows, closes, i: int, window: int = 1) -> list[CRT]:
+    """
+    TOUS les CRT où la bougie de manipulation est à l'index i : un CRT par bougie
+    'range' valide parmi i-1 .. i-window. Chaque distance de range = un modèle
+    distinct (span -> 3,4,5… bougies), possiblement de sens différent. Renvoyés
+    du modèle le plus court (range proche) au plus long.
+    """
+    out: list[CRT] = []
+    if i < 1 or i >= len(closes):
+        return out
+    c2_high, c2_low, c2_close = highs[i], lows[i], closes[i]
+    stop = max(-1, i - 1 - window)
+    for r in range(i - 1, stop, -1):
+        c1_high, c1_low = highs[r], lows[r]
+        swept_low = c2_low < c1_low
+        swept_high = c2_high > c1_high
+        if not (c1_low <= c2_close <= c1_high) or not (swept_low or swept_high):
+            continue
+        if swept_low and not swept_high:
+            d = "bull"
+        elif swept_high and not swept_low:
+            d = "bear"
+        else:
+            d = "both"
+        out.append(CRT(d, c1_low, c1_high, c2_low, c2_high, c2_close, span=i - r))
+    return out
+
+
+def dir_aligned(a: str, b: str) -> bool:
+    """Deux sens sont compatibles si identiques, ou si l'un est 'both' (outside)."""
+    return a == b or "both" in (a, b)
+
+
 def directions_aligned(a: CRT, b: CRT) -> bool:
-    if "both" in (a.direction, b.direction):
-        return True
-    return a.direction == b.direction
+    return dir_aligned(a.direction, b.direction)
 
 
 # ===========================================================================
@@ -237,20 +268,20 @@ class CCXTSource(Source):
 # ===========================================================================
 def weekly_context(source: Source, symbol: str, window: int = 1):
     """
-    Renvoie (crt_weekly, weekly_ts, week_start, week_end) si la dernière weekly
-    clôturée forme un CRT (range cherché jusqu'à `window` weekly avant), sinon None.
-    week_start = open de la semaine en cours. week_start et les open H4 viennent du
-    même flux : la fenêtre est donc cohérente quel que soit le fuseau du fournisseur.
+    Renvoie (modeles_weekly, weekly_ts, week_start, week_end) ou None.
+    modeles_weekly = liste de TOUS les CRT weekly formés par la dernière weekly
+    clôturée (un par distance de range -> modèles 3,4,5… bougies), chacun avec son
+    propre sens (ils peuvent se contredire). week_start = open de la semaine en cours.
     """
     t, h, l, c = source.ohlcv(symbol, "1w", max(6, window + 2))
     if len(c) < 2:
         return None
-    crt = detect_crt(h, l, c, window)
-    if crt is None:
+    models = crt_all(h, l, c, len(c) - 1, window)
+    if not models:
         return None
     weekly_ts = t[-1]
     week_start = weekly_ts + WEEK_MS
-    return crt, weekly_ts, week_start, week_start + WEEK_MS
+    return models, weekly_ts, week_start, week_start + WEEK_MS
 
 
 # ===========================================================================
@@ -276,19 +307,17 @@ _LABEL = {"bull": ("🟢", "LONG"), "bear": ("🔴", "SHORT"), "both": ("⚪", "
 _JOURS_FR = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"]
 
 
-def format_alert(m: "Match") -> str:
-    emoji, w_dir = _LABEL[m.weekly.direction]
-    sym = m.symbol.split(":")[-1]          # BINANCE:BTCUSDT -> BTCUSDT
-    dt = datetime.fromtimestamp(m.h4_ts / 1000, tz=DISPLAY_TZ)
-    when = f"{_JOURS_FR[dt.weekday()]} {dt:%H:%M}"   # ex. "ven 18:00"
-    # span = écart bougies range -> manipulation. 1 = 3 candle model classique,
-    # sinon formation plus longue (range + intermédiaires + manip + expansion).
-    n = m.h4.span + 2
-    model = "3 candle model" if m.h4.span == 1 else f"{n} candle model (étendu)"
+def format_alert(symbol: str, h: "H4Hit", confirmed: list) -> str:
+    """Alerte : une manipulation H4 qui confirme un ou plusieurs modèles weekly."""
+    emoji, dlab = _LABEL[h.direction]
+    sym = symbol.split(":")[-1]            # BINANCE:BTCUSDT -> BTCUSDT
+    dt = datetime.fromtimestamp(h.ts / 1000, tz=DISPLAY_TZ)
+    when = f"{_JOURS_FR[dt.weekday()]} {dt:%H:%M}"
+    sizes = ", ".join(f"{w.span + 2}C" for w in sorted(confirmed, key=lambda c: c.span))
     return (
-        f"{emoji} <b>{sym} · {w_dir}</b>\n"
-        f"🕓 H4 · {when}\n"
-        f"📐 {model}"
+        f"{emoji} <b>{sym} · {dlab}</b>\n"
+        f"🕓 H4 · {when} · {h.span + 2}C\n"
+        f"📐 confirme Weekly {dlab} · {sizes}"
     )
 
 
@@ -311,26 +340,31 @@ def save_seen(path: str, seen: dict) -> None:
         json.dump(seen, open(path, "w"))
 
 
-def alert_key(m: "Match") -> str:
-    return f"{m.symbol}|{m.weekly_ts}|{m.h4_ts}"
+def alert_key(symbol: str, weekly_ts: int, h: "H4Hit") -> str:
+    return f"{symbol}|{weekly_ts}|{h.ts}|{h.direction}|{h.span}"
 
 
 # ===========================================================================
 # 6) Scanner
 # ===========================================================================
 @dataclass
-class Match:
+class H4Hit:
+    ts: int
+    span: int
+    direction: str
+
+
+@dataclass
+class SymResult:
     symbol: str
-    weekly: CRT
-    h4: CRT
-    aligned: bool
     weekly_ts: int
-    h4_ts: int
+    weekly: list      # list[CRT] : tous les modèles weekly (3,4,5… bougies), sens variés
+    h4s: list         # list[H4Hit] : tous les CRT H4 de la semaine en cours
 
 
-def scan(source: Source, symbols: list[str], require_align: bool,
-         latest_only: bool = False, window: int = 1) -> list[Match]:
-    matches: list[Match] = []
+def scan(source: Source, symbols: list[str], require_align: bool = True,
+         latest_only: bool = False, window: int = 1) -> list[SymResult]:
+    results: list[SymResult] = []
     total = len(symbols)
 
     for idx, symbol in enumerate(symbols, 1):
@@ -339,63 +373,81 @@ def scan(source: Source, symbols: list[str], require_align: bool,
             ctx = weekly_context(source, symbol, window)
             if ctx is None:
                 continue
-            weekly, weekly_ts, week_start, week_end = ctx
+            models, weekly_ts, week_start, week_end = ctx
 
             hts, hh, hl, hc = source.ohlcv(symbol, "4h", 80)
-            if len(hts) < 2:
-                continue
-
             idxs = [i for i in range(1, len(hts)) if week_start <= hts[i] < week_end]
             if latest_only and idxs:
                 idxs = [idxs[-1]]
 
+            h4s: list[H4Hit] = []
+            seen_pair = set()                       # 1 ligne par (bougie H4, sens) : modèle le + court
             for i in idxs:
-                h4 = crt_at(hh, hl, hc, i, window)
-                if h4 is None:
-                    continue
-                aligned = directions_aligned(weekly, h4)
-                if require_align and not aligned:
-                    continue
-                matches.append(Match(symbol, weekly, h4, aligned, weekly_ts, hts[i]))
+                for crt in crt_all(hh, hl, hc, i, window):
+                    key = (hts[i], crt.direction)
+                    if key in seen_pair:
+                        continue
+                    seen_pair.add(key)
+                    h4s.append(H4Hit(hts[i], crt.span, crt.direction))
+
+            results.append(SymResult(symbol, weekly_ts, models, h4s))
         except Exception as exc:
             print(f"\n  [!] {symbol}: {exc}", file=sys.stderr)
             continue
 
     print("\r" + " " * 42 + "\r", end="", file=sys.stderr)
-    return matches
+    return results
 
 
-def matches_to_df(matches: list[Match]) -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "symbol": m.symbol,
-            "weekly": m.weekly.direction,
-            "h4": m.h4.direction,
-            "h4_time": fmt_time(m.h4_ts, "%m-%d %H:%M %Z"),
-            "aligned": m.aligned,
-            "w_range": f"{m.weekly.c1_low:g}–{m.weekly.c1_high:g}",
-            "h4_range": f"{m.h4.c1_low:g}–{m.h4.c1_high:g}",
-            "h4_close": f"{m.h4.c2_close:g}",
-        }
-        for m in matches
-    )
+def weekly_blocks(res: SymResult):
+    """[(modele_weekly, [H4Hit du même sens, récents d'abord]), ...] trié par taille de modèle."""
+    blocks = []
+    for w in sorted(res.weekly, key=lambda c: c.span):
+        hits = sorted([h for h in res.h4s if dir_aligned(w.direction, h.direction)],
+                      key=lambda h: h.ts, reverse=True)
+        blocks.append((w, hits))
+    return blocks
+
+
+def iter_alerts(results: list[SymResult]):
+    """Génère (symbol, weekly_ts, H4Hit, [modèles weekly confirmés]) pour chaque manip H4 alignée."""
+    for res in results:
+        for h in res.h4s:
+            confirmed = [w for w in res.weekly if dir_aligned(w.direction, h.direction)]
+            if confirmed:
+                yield res.symbol, res.weekly_ts, h, confirmed
+
+
+def results_to_df(results: list[SymResult]) -> pd.DataFrame:
+    rows = []
+    for res in results:
+        sym = res.symbol.split(":")[-1]
+        for w, hits in weekly_blocks(res):
+            for h in hits:
+                rows.append({
+                    "symbol": sym,
+                    "weekly": f"{w.span + 2}C {w.direction}",
+                    "h4": f"{h.span + 2}C {h.direction}",
+                    "h4_time": fmt_time(h.ts, "%m-%d %H:%M %Z"),
+                })
+    return pd.DataFrame(rows)
 
 
 def run_once(source, symbols, require_align, out=None, tg=None, seen_path=None,
              latest_only=False, window=1):
     stamp = datetime.now(tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
     win_txt = f" — fenêtre {window} bougie(s)" if window > 1 else ""
-    print(f"\n=== Scan CRT W+H4 — {len(symbols)} symboles — source {source.name}{win_txt} — {stamp} ===")
-    matches = scan(source, symbols, require_align, latest_only, window)
+    print(f"\n=== Scan CRT Weekly+H4 — {len(symbols)} symboles — source {source.name}{win_txt} — {stamp} ===")
+    results = scan(source, symbols, require_align, latest_only, window)
 
-    if not matches:
-        print("Aucun setup CRT W+H4 pour le moment.")
+    df = results_to_df(results)
+    if df.empty:
+        print("Aucune confluence CRT Weekly+H4 pour le moment.")
         return
 
-    df = matches_to_df(matches)
     pd.set_option("display.max_rows", None)
     pd.set_option("display.width", 200)
-    print(f"\n{len(df)} setup(s) valide(s) :\n")
+    print(f"\n{len(df)} confluence(s) (modèle weekly × manip H4) :\n")
     print(df.to_string(index=False))
 
     if out:
@@ -403,26 +455,26 @@ def run_once(source, symbols, require_align, out=None, tg=None, seen_path=None,
         print(f"\n💾 exporté → {out}")
 
     if tg:
-        sent = send_new_alerts(matches, tg, seen_path)
-        print(f"📨 {sent} nouvelle(s) alerte(s) Telegram "
-              f"({len(matches) - sent} déjà notifiée(s)).")
+        sent, total = send_new_alerts(results, tg, seen_path)
+        print(f"📨 {sent} nouvelle(s) alerte(s) Telegram ({total - sent} déjà notifiée(s)).")
 
 
-def send_new_alerts(matches: list["Match"], tg, seen_path) -> int:
-    """Envoie sur Telegram les setups pas encore notifiés (dédup). Renvoie le nb envoyé."""
+def send_new_alerts(results: list["SymResult"], tg, seen_path):
+    """Envoie sur Telegram les manips H4 (confirmant ≥1 modèle weekly) non encore notifiées."""
     token, chat_id = tg
     seen = load_seen(seen_path)
     now_iso = datetime.now(timezone.utc).isoformat()
-    sent = 0
-    for m in matches:
-        key = alert_key(m)
+    sent = total = 0
+    for symbol, weekly_ts, h, confirmed in iter_alerts(results):
+        total += 1
+        key = alert_key(symbol, weekly_ts, h)
         if key in seen:
             continue
-        if send_telegram(token, chat_id, format_alert(m)):
+        if send_telegram(token, chat_id, format_alert(symbol, h, confirmed)):
             seen[key] = now_iso
             sent += 1
     save_seen(seen_path, seen)
-    return sent
+    return sent, total
 
 
 # ===========================================================================
@@ -455,12 +507,10 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 .sw{width:9px;height:9px;border-radius:3px}
 .sw.bull{background:var(--bull)}.sw.bear{background:var(--bear)}.sw.both{background:var(--both)}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
-.card{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:15px 16px 7px;overflow:hidden;transition:transform .15s ease,border-color .15s ease}
+.card{position:relative;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:15px 16px 9px;transition:transform .15s ease,border-color .15s ease}
 .card:hover{transform:translateY(-2px);border-color:#34415c}
-.card::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px}
-.card.bull::before{background:var(--bull)}.card.bear::before{background:var(--bear)}.card.both::before{background:var(--both)}
-.chead{display:flex;align-items:center;gap:10px;margin-bottom:3px;padding-left:7px}
-.wsub{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted);padding-left:7px;margin-bottom:4px}
+.chead{display:flex;align-items:center;gap:10px;margin-bottom:3px;padding-left:2px}
+.wsub{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted);padding-left:2px;margin-bottom:10px}
 .wsub b{color:#c2c8d4;font-weight:500}
 .pair{font-size:19px;font-weight:700;letter-spacing:-.3px}
 .wpill{font-size:10px;font-weight:700;letter-spacing:.09em;padding:4px 9px;border-radius:20px;text-transform:uppercase}
@@ -468,21 +518,31 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 .wpill.bear{background:rgba(232,88,94,.14);color:var(--bear)}
 .wpill.both{background:rgba(152,161,179,.14);color:var(--both)}
 .count{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12px;color:var(--muted);background:var(--surface-2);border-radius:8px;padding:3px 9px}
-.row{display:flex;align-items:center;gap:10px;padding:8px 7px;border-top:1px solid rgba(255,255,255,.045)}
-.row.fresh{background:linear-gradient(90deg,rgba(227,177,92,.07),transparent)}
-.tag{font-size:11px;font-weight:700;letter-spacing:.04em;width:64px;flex:none;display:flex;align-items:center;gap:7px}
+.wmodel{margin-bottom:10px;border-left:3px solid var(--line);padding:1px 0 1px 10px}
+.wmodel.bull{border-left-color:var(--bull)}
+.wmodel.bear{border-left-color:var(--bear)}
+.wmodel.both{border-left-color:var(--both)}
+.wmhead{display:flex;align-items:center;gap:8px;padding:2px 2px 5px}
+.gchip{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:6px;background:var(--surface-2);color:var(--muted)}
+.gchip.ext{background:rgba(227,177,92,.14);color:var(--accent)}
+.glabel{font-size:10px;text-transform:uppercase;letter-spacing:.11em;color:var(--muted)}
+.wmdir{display:flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;letter-spacing:.05em}
+.wmdir .dot{width:7px;height:7px;border-radius:50%}
+.wmdir.bull{color:var(--bull)}.wmdir.bull .dot{background:var(--bull)}
+.wmdir.bear{color:var(--bear)}.wmdir.bear .dot{background:var(--bear)}
+.wmdir.both{color:var(--both)}.wmdir.both .dot{background:var(--both)}
+.gcount{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted)}
+.row{display:flex;align-items:center;gap:10px;padding:6px 2px}
+.row.fresh{background:linear-gradient(90deg,rgba(227,177,92,.09),transparent);border-radius:6px}
+.tag{font-size:11px;font-weight:700;letter-spacing:.04em;width:60px;flex:none;display:flex;align-items:center;gap:7px}
 .tag .dot{width:7px;height:7px;border-radius:50%;flex:none}
 .tag.bull{color:var(--bull)}.tag.bull .dot{background:var(--bull)}
 .tag.bear{color:var(--bear)}.tag.bear .dot{background:var(--bear)}
 .tag.both{color:var(--both)}.tag.both .dot{background:var(--both)}
 .when{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:#ccd2dd;font-variant-numeric:tabular-nums}
-.grp{display:flex;align-items:center;gap:8px;margin:0 7px;padding:11px 0 4px;border-top:1px solid rgba(255,255,255,.07)}
-.grp.first{border-top:none;padding-top:4px}
-.gchip{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:10.5px;font-weight:600;padding:2px 7px;border-radius:6px;background:var(--surface-2);color:var(--muted)}
-.gchip.ext{background:rgba(227,177,92,.14);color:var(--accent)}
-.glabel{font-size:10px;text-transform:uppercase;letter-spacing:.11em;color:var(--muted)}
-.gcount{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted)}
-.grp + .row{border-top:none}
+.hsize{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted);background:var(--surface-2);padding:1px 7px;border-radius:6px}
+.hsize.ext{background:rgba(227,177,92,.13);color:var(--accent)}
+.noh4{padding:2px 2px 6px;color:#5d6678;font-size:12px;font-style:italic}
 .empty{grid-column:1/-1;color:var(--muted);padding:60px;text-align:center;background:var(--surface);border:1px solid var(--line);border-radius:14px}
 .foot{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);color:#5d6678;font-size:12px;display:flex;gap:18px;flex-wrap:wrap;font-family:'IBM Plex Mono',ui-monospace,monospace}
 @media (prefers-reduced-motion:reduce){.pip{animation:none}.card{transition:none}}
@@ -490,67 +550,67 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 """
 
 
-def render_dashboard(matches, stamp, window, source_name, refresh_s=60) -> str:
-    by_sym: dict[str, list] = {}
-    for m in matches:
-        by_sym.setdefault(m.symbol, []).append(m)
+def render_dashboard(results, stamp, window, source_name, refresh_s=60) -> str:
+    results = sorted(results, key=lambda r: r.symbol)
 
-    tally = {"bear": 0, "bull": 0, "both": 0}
-    for m in matches:
-        tally[m.h4.direction] = tally.get(m.h4.direction, 0) + 1
+    wt = {"bear": 0, "bull": 0, "both": 0}                  # modèles weekly par sens
+    for res in results:
+        for w in res.weekly:
+            wt[w.direction] = wt.get(w.direction, 0) + 1
 
     cards = []
-    for sym, ms in sorted(by_sym.items()):
-        wcls, wlab = _DIR[ms[0].weekly.direction]
-        latest_ts = max(m.h4_ts for m in ms)
-
-        groups: dict[int, list] = {}                       # regroupe par modèle (span)
-        for m in ms:
-            groups.setdefault(m.h4.span, []).append(m)
-
+    for res in results:
+        latest_ts = max((h.ts for h in res.h4s), default=0)
         blocks = []
-        for gi, span in enumerate(sorted(groups)):          # classiques (3C) d'abord
-            n = span + 2
-            ext = " ext" if span > 1 else ""
-            first = " first" if gi == 0 else ""
-            gms = sorted(groups[span], key=lambda x: x.h4_ts, reverse=True)
+        for w in sorted(res.weekly, key=lambda c: c.span):
+            wcls, wlab = _DIR[w.direction]
+            wn = w.span + 2
+            wext = " ext" if w.span > 1 else ""
+            hits = sorted([h for h in res.h4s if dir_aligned(w.direction, h.direction)],
+                          key=lambda h: h.ts, reverse=True)
             rows = []
-            for m in gms:
-                dcls, dlab = _DIR[m.h4.direction]
-                dt = datetime.fromtimestamp(m.h4_ts / 1000, tz=DISPLAY_TZ)
+            for h in hits:
+                dcls, dlab = _DIR[h.direction]
+                dt = datetime.fromtimestamp(h.ts / 1000, tz=DISPLAY_TZ)
                 when = f"{_JOURS_FR[dt.weekday()]} {dt:%d/%m · %H:%M}"
-                fresh = " fresh" if m.h4_ts == latest_ts else ""
+                fresh = " fresh" if h.ts == latest_ts else ""
+                hext = " ext" if h.span > 1 else ""
                 rows.append(
                     f'<div class="row{fresh}">'
                     f'<span class="tag {dcls}"><span class="dot"></span>{dlab}</span>'
-                    f'<span class="when">{html.escape(when)}</span></div>'
+                    f'<span class="when">{html.escape(when)}</span>'
+                    f'<span class="hsize{hext}">{h.span + 2}C</span></div>'
                 )
+            body = "".join(rows) or '<div class="noh4">aucune confluence H4 pour l\'instant</div>'
             blocks.append(
-                f'<div class="grp{first}"><span class="gchip{ext}">{n}C</span>'
-                f'<span class="glabel">modèle {n} bougies</span>'
-                f'<span class="gcount">{len(gms)}</span></div>{"".join(rows)}'
+                f'<div class="wmodel {wcls}"><div class="wmhead">'
+                f'<span class="gchip{wext}">{wn}C</span>'
+                f'<span class="glabel">weekly {wn} bougies</span>'
+                f'<span class="wmdir {wcls}"><span class="dot"></span>{wlab}</span>'
+                f'<span class="gcount">{len(hits)}</span></div>{body}</div>'
             )
 
-        clean = html.escape(sym.split(":")[-1])
-        wdt = datetime.fromtimestamp(ms[0].weekly_ts / 1000, tz=DISPLAY_TZ)
+        clean = html.escape(res.symbol.split(":")[-1])
+        wdt = datetime.fromtimestamp(res.weekly_ts / 1000, tz=DISPLAY_TZ)
         cards.append(
-            f'<div class="card {wcls}"><div class="chead">'
+            f'<div class="card"><div class="chead">'
             f'<span class="pair">{clean}</span>'
-            f'<span class="wpill {wcls}">Weekly {wlab}</span>'
-            f'<span class="count">{len(ms)}</span></div>'
+            f'<span class="count">{len(res.weekly)} modèles</span></div>'
             f'<div class="wsub">manipulation weekly · <b>sem. du {wdt:%d/%m}</b></div>'
             f'{"".join(blocks)}</div>'
         )
 
-    grid = "".join(cards) or '<div class="empty">Aucun setup CRT Weekly + H4 pour le moment.</div>'
+    grid = "".join(cards) or '<div class="empty">Aucun CRT weekly pour le moment.</div>'
     win_txt = f"fenêtre {window} bougies" if window > 1 else "modèle strict"
+    npairs = len(results)
+    nmodels = sum(len(r.weekly) for r in results)
 
     def _tchip(cls, lab, n):
         return f'<span class="tally"><span class="sw {cls}"></span><b>{n}</b> {lab}</span>'
 
-    tallies = (_tchip("bear", "short", tally.get("bear", 0))
-               + _tchip("bull", "long", tally.get("bull", 0))
-               + _tchip("both", "outside", tally.get("both", 0)))
+    tallies = (_tchip("bear", "short", wt.get("bear", 0))
+               + _tchip("bull", "long", wt.get("bull", 0))
+               + _tchip("both", "outside", wt.get("both", 0)))
 
     return (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
@@ -562,15 +622,15 @@ def render_dashboard(matches, stamp, window, source_name, refresh_s=60) -> str:
         '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
         'family=Archivo:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">'
         f'<style>{_DASH_CSS}</style></head><body><div class="wrap">'
-        f'<h2 class="sr-only">CRT Scanner : {len(matches)} setups Weekly+H4 alignés sur {len(by_sym)} paires.</h2>'
+        f'<h2 class="sr-only">CRT Scanner : {nmodels} modèles weekly sur {npairs} paires.</h2>'
         '<div class="topbar"><div class="brand"><div class="logo">CRT</div>'
         '<div><div class="name">Scanner</div><div class="sub">Weekly · H4 confluence</div></div></div>'
         f'<div class="live"><span class="pip"></span>maj {html.escape(stamp)}</div></div>'
-        f'<div class="summary"><div class="bignum">{len(matches)}<span>setups alignés</span></div>'
+        f'<div class="summary"><div class="bignum">{npairs}<span>paires actives</span></div>'
         f'<div class="tallies">{tallies}</div></div>'
         f'<div class="grid">{grid}</div>'
         f'<div class="foot"><span>&#8635; auto {refresh_s}s</span><span>{html.escape(win_txt)}</span>'
-        f'<span>source {html.escape(source_name)}</span><span>{len(by_sym)} paires</span></div>'
+        f'<span>{nmodels} modèles weekly</span><span>source {html.escape(source_name)}</span></div>'
         '</div></body></html>'
     )
 
@@ -701,12 +761,13 @@ def main() -> None:
     # Idéal serverless (GitHub Actions) : un seul passage fait dashboard + Telegram.
     if args.html:
         stamp = datetime.now(tz=DISPLAY_TZ).strftime("%Y-%m-%d %H:%M %Z")
-        matches = scan(source, symbols, args.align, args.latest_only, args.crt_window)
+        results = scan(source, symbols, args.align, args.latest_only, args.crt_window)
         with open(args.html, "w", encoding="utf-8") as f:
-            f.write(render_dashboard(matches, stamp, args.crt_window, source.name))
-        msg = f"📊 dashboard écrit → {args.html}  ({len(matches)} setup(s))"
+            f.write(render_dashboard(results, stamp, args.crt_window, source.name))
+        nmodels = sum(len(r.weekly) for r in results)
+        msg = f"📊 dashboard écrit → {args.html}  ({len(results)} paires · {nmodels} modèles weekly)"
         if tg:
-            sent = send_new_alerts(matches, tg, args.seen_file)
+            sent, _ = send_new_alerts(results, tg, args.seen_file)
             msg += f" · 📨 {sent} nouvelle(s) alerte(s)"
         print(msg)
         return
