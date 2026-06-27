@@ -87,6 +87,7 @@ class CRT:
     c2_high: float
     c2_close: float
     span: int = 1    # nb de bougies entre la range et la manipulation (1 = 3 candle model)
+    done: bool = False   # target (bord opposé du range) déjà atteinte -> setup consommé
 
 
 def crt_at(highs, lows, closes, i: int, window: int = 1) -> CRT | None:
@@ -362,15 +363,16 @@ def build_recap(results: list, stamp: str) -> tuple:
     head = f"📊 <b>Récap CRT du jour</b>\n<i>{html.escape(stamp)}</i>"
     blocks, syms = [], []
     for res in sorted(results, key=lambda r: r.symbol):
-        if not res.weekly:
-            continue
-        sym = res.symbol.split(":")[-1]
         parts = []
         for w in sorted(res.weekly, key=lambda c: c.span):
+            if w.done:                          # target weekly atteinte -> on ignore
+                continue
             emoji, dlab = _LABEL[w.direction]
-            nh = sum(1 for hh in res.h4s if dir_aligned(w.direction, hh.direction))
+            nh = sum(1 for hh in res.h4s if dir_aligned(w.direction, hh.direction) and not hh.done)
             parts.append(f"{emoji} W{w.span + 2}C {dlab} ({nh} H4)")
-        blocks.append(f"<b>{sym}</b> · " + " | ".join(parts))
+        if not parts:
+            continue
+        blocks.append(f"<b>{res.symbol.split(':')[-1]}</b> · " + " | ".join(parts))
         syms.append(res.symbol)
     text = head + "\n\n" + ("\n".join(blocks) if blocks else "Aucun setup actif aujourd'hui.")
     return text, _pair_buttons(syms)
@@ -407,6 +409,8 @@ class H4Hit:
     ts: int
     span: int
     direction: str
+    target: float = 0.0   # bord opposé du range H4 (cible du trade)
+    done: bool = False    # cible déjà touchée par une bougie postérieure
 
 
 @dataclass
@@ -441,7 +445,20 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
             models, weekly_ts, week_start, week_end = ctx
 
             hts, hh, hl, hc = source.ohlcv(symbol, "4h", 80)
-            idxs = [i for i in range(1, len(hts)) if week_start <= hts[i] < week_end]
+            n = len(hts)
+
+            # Extrêmes de la semaine en cours (TOUTES les bougies, même session exclue) :
+            # sert à savoir si la TARGET WEEKLY (bord opposé du range weekly) a été atteinte.
+            wk = [i for i in range(n) if week_start <= hts[i] < week_end]
+            week_high = max((hh[i] for i in wk), default=None)
+            week_low = min((hl[i] for i in wk), default=None)
+            for w in models:
+                if w.direction == "bull" and week_high is not None and week_high >= w.c1_high:
+                    w.done = True
+                elif w.direction == "bear" and week_low is not None and week_low <= w.c1_low:
+                    w.done = True
+
+            idxs = [i for i in range(1, n) if week_start <= hts[i] < week_end]
             if skip:                                 # retire les H4 de la session exclue
                 idxs = [i for i in idxs
                         if not _in_skip(datetime.fromtimestamp(hts[i] / 1000, tz=DISPLAY_TZ).hour, skip)]
@@ -458,7 +475,14 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
                     if key in seen_pair:
                         continue
                     seen_pair.add(key)
-                    h4s.append(H4Hit(hts[i], crt.span, crt.direction))
+                    # target H4 = bord opposé du range ; atteinte si une bougie postérieure la touche
+                    if crt.direction == "bull":
+                        target = crt.c1_high
+                        done = any(hh[j] >= target for j in range(i + 1, n))
+                    else:
+                        target = crt.c1_low
+                        done = any(hl[j] <= target for j in range(i + 1, n))
+                    h4s.append(H4Hit(hts[i], crt.span, crt.direction, target, done))
 
             results.append(SymResult(symbol, weekly_ts, models, h4s))
         except Exception as exc:
@@ -536,11 +560,14 @@ def send_new_alerts(results: list["SymResult"], tg, seen_path):
     now_iso = datetime.now(timezone.utc).isoformat()
     new_items, new_keys, total = [], [], 0
     for symbol, weekly_ts, h, confirmed in iter_alerts(results):
+        live = [w for w in confirmed if not w.done]
+        if h.done or not live:           # target atteinte (H4 ou tous les weekly) -> pas d'alerte
+            continue
         total += 1
         key = alert_key(symbol, weekly_ts, h)
         if key in seen:
             continue
-        new_items.append((symbol, h, confirmed))
+        new_items.append((symbol, h, live))
         new_keys.append(key)
 
     if new_items:
@@ -669,6 +696,11 @@ body{background:var(--ground);color:var(--text);font-family:'Archivo',system-ui,
 .hsize{margin-left:auto;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:11px;color:var(--muted);background:var(--surface-2);padding:1px 7px;border-radius:6px}
 .hsize.ext{background:rgba(227,177,92,.13);color:var(--accent)}
 .noh4{padding:2px 2px 6px;color:#5d6678;font-size:12px;font-style:italic}
+.wmodel.done{opacity:.42}
+.row.done{opacity:.5}
+.row.done .when{text-decoration:line-through}
+.tgt{margin-left:6px;font-size:11px;flex:none}
+.donetag{margin-left:8px;font-size:9px;font-weight:700;letter-spacing:.04em;color:var(--accent);background:rgba(227,177,92,.14);padding:2px 6px;border-radius:5px;white-space:nowrap}
 .empty{grid-column:1/-1;color:var(--muted);padding:60px;text-align:center;background:var(--surface);border:1px solid var(--line);border-radius:14px}
 .foot{margin-top:26px;padding-top:16px;border-top:1px solid var(--line);color:#5d6678;font-size:12px;display:flex;gap:18px;flex-wrap:wrap;font-family:'IBM Plex Mono',ui-monospace,monospace}
 .hdot{width:8px;height:8px;border-radius:50%;background:var(--both);flex:none}
@@ -711,6 +743,7 @@ def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=Non
             wcls, wlab = _DIR[w.direction]
             wn = w.span + 2
             wext = " ext" if w.span > 1 else ""
+            wdone = " done" if w.done else ""
             hits = sorted([h for h in res.h4s if dir_aligned(w.direction, h.direction)],
                           key=lambda h: h.ts, reverse=True)
             rows = []
@@ -718,21 +751,24 @@ def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=Non
                 dcls, dlab = _DIR[h.direction]
                 dt = datetime.fromtimestamp(h.ts / 1000, tz=DISPLAY_TZ)
                 when = f"{_JOURS_FR[dt.weekday()]} {dt:%d/%m · %H:%M}"
-                fresh = " fresh" if h.ts == latest_ts else ""
+                rdone = h.done or w.done
+                fresh = " fresh" if (h.ts == latest_ts and not rdone) else ""
                 hext = " ext" if h.span > 1 else ""
+                mark = '<span class="tgt" title="target atteinte">🎯</span>' if rdone else ""
                 rows.append(
-                    f'<div class="row{fresh}">'
+                    f'<div class="row{fresh}{" done" if rdone else ""}">'
                     f'<span class="tag {dcls}"><span class="dot"></span>{dlab}</span>'
                     f'<span class="when">{html.escape(when)}</span>'
-                    f'<span class="hsize{hext}">{h.span + 2}C</span></div>'
+                    f'<span class="hsize{hext}">{h.span + 2}C</span>{mark}</div>'
                 )
             body = "".join(rows) or '<div class="noh4">aucune confluence H4 pour l\'instant</div>'
+            done_tag = '<span class="donetag">🎯 target atteinte</span>' if w.done else ""
             blocks.append(
-                f'<div class="wmodel {wcls}"><div class="wmhead">'
+                f'<div class="wmodel {wcls}{wdone}"><div class="wmhead">'
                 f'<span class="gchip{wext}">{wn}C</span>'
                 f'<span class="glabel">weekly {wn} bougies</span>'
                 f'<span class="wmdir {wcls}"><span class="dot"></span>{wlab}</span>'
-                f'<span class="gcount">{len(hits)}</span></div>{body}</div>'
+                f'<span class="gcount">{len(hits)}</span>{done_tag}</div>{body}</div>'
             )
 
         clean = html.escape(res.symbol.split(":")[-1])
