@@ -486,14 +486,10 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
                     if key in seen_pair:
                         continue
                     seen_pair.add(key)
-                    # target H4 = bord opposé du range ; atteinte si une bougie postérieure la touche
-                    if crt.direction == "bull":
-                        target = crt.c1_high
-                        done = any(hh[j] >= target for j in range(i + 1, n))
-                    else:
-                        target = crt.c1_low
-                        done = any(hl[j] <= target for j in range(i + 1, n))
-                    h4s.append(H4Hit(hts[i], crt.span, crt.direction, target, done))
+                    # NB : pas de "target H4". La seule cible = le bord opposé du CRT weekly
+                    # (géré au niveau du modèle weekly via w.done). Le bord du range H4 n'est
+                    # pas un objectif dans la stratégie.
+                    h4s.append(H4Hit(hts[i], crt.span, crt.direction))
 
             results.append(SymResult(symbol, weekly_ts, models, h4s))
         except Exception as exc:
