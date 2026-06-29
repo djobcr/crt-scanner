@@ -24,14 +24,17 @@ GOLD = "#6b4e0a"        # petit repère TP (discret, lisible sur gris)
 _JOURS = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"]
 
 
-def _candles(ax, bars):
+def _candles(ax, bars, future_frac=0.42):
     for i, (ts, o, h, l, c) in enumerate(bars):
         col = UP if c >= o else DOWN
-        ax.plot([i, i], [l, h], color=BORDER, linewidth=0.9, zorder=2, solid_capstyle="butt")
+        ax.plot([i, i], [l, h], color=BORDER, linewidth=0.8, zorder=2, solid_capstyle="butt")
         lo, hi = (o, c) if c >= o else (c, o)
-        ax.add_patch(Rectangle((i - 0.3, lo), 0.6, max(hi - lo, 1e-9),
-                               facecolor=col, edgecolor=BORDER, linewidth=0.7, zorder=3))
-    ax.set_xlim(-1, len(bars) + 1)
+        ax.add_patch(Rectangle((i - 0.27, lo), 0.54, max(hi - lo, 1e-9),
+                               facecolor=col, edgecolor=BORDER, linewidth=0.6, zorder=3))
+    # espace vide à droite (le "futur"), comme TradingView : les lignes CRT s'y étendent
+    ax.set_xlim(-1, len(bars) + int(len(bars) * future_frac))
+    # un peu d'air en haut/bas
+    ax.margins(y=0.08)
 
 
 def _axis(ax, bars, tz, title):

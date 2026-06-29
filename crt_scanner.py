@@ -632,8 +632,8 @@ def _build_chart(source, symbol, items, window):
         target = wm.c1_high if direction == "bull" else wm.c1_low
         same = [h for h, _ in items if h.direction == direction] or [items[0][0]]
         h = max(same, key=lambda x: x.ts)
-        w_bars = source.ohlc_full(symbol, "1w", 24)[-24:]
-        h4_bars = source.ohlc_full(symbol, "4h", 70)[-70:]
+        w_bars = source.ohlc_full(symbol, "1w", 40)[-40:]
+        h4_bars = source.ohlc_full(symbol, "4h", 80)[-80:]
         if not w_bars or not h4_bars:
             return None
         return chart.crt_chart(symbol, w_bars, h4_bars, wm, target,
