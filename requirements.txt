@@ -1,5 +1,3 @@
 pandas
 tradingview-datafeed
-matplotlib
-requests
 # ccxt          # décommenter pour utiliser la source --source ccxt (crypto seulement)

@@ -238,24 +238,6 @@ class TradingViewSource(Source):
         return ([r[0] for r in rows], [r[1] for r in rows],
                 [r[2] for r in rows], [r[3] for r in rows])
 
-    def ohlc_full(self, symbol, timeframe, limit):
-        """Comme ohlcv mais renvoie des bougies complètes (ts, open, high, low, close) — pour les charts."""
-        sym, ex = self._split(symbol)
-        df = self.tv.get_hist(sym, ex, interval=self._TF[timeframe], n_bars=limit + 2)
-        if df is None or len(df) == 0:
-            return []
-        df = df.rename(columns={c: c.lower() for c in df.columns})
-        rows = []
-        for ts, row in df.iterrows():
-            pts = pd.Timestamp(ts)
-            if pts.tzinfo is None:
-                pts = pts.tz_localize(self.src_tz)
-            open_ms = int(pts.timestamp() * 1000)
-            rows.append((open_ms, float(row["open"]), float(row["high"]),
-                         float(row["low"]), float(row["close"])))
-        now = int(time.time() * 1000)
-        return [r for r in rows if r[0] + TF_MS[timeframe] <= now]   # bougies clôturées
-
     def default_symbols(self):
         majors = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
         return ([f"{self.tv_exchange}:{m}" for m in majors]
@@ -333,22 +315,6 @@ def send_telegram(token: str, chat_id: str, text: str, buttons=None) -> bool:
             return r.status == 200
     except Exception as exc:
         print(f"  [telegram] échec d'envoi : {exc}", file=sys.stderr)
-        return False
-
-
-def send_telegram_photo(token, chat_id, photo_bytes, caption, buttons=None) -> bool:
-    """Envoie une photo (chart) avec légende. Utilise requests (multipart)."""
-    import requests
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
-    if buttons:
-        data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
-    try:
-        r = requests.post(url, data=data,
-                          files={"photo": ("crt.png", photo_bytes, "image/png")}, timeout=30)
-        return r.status_code == 200
-    except Exception as exc:
-        print(f"  [telegram] échec photo : {exc}", file=sys.stderr)
         return False
 
 
@@ -605,50 +571,12 @@ def run_once(source, symbols, require_align, out=None, tg=None, seen_path=None,
         print(f"📨 {sent} nouvelle(s) alerte(s) Telegram ({total - sent} déjà notifiée(s)).")
 
 
-def _symbol_caption(symbol, items):
-    """items = [(H4Hit, [modèles weekly confirmés])]. Légende d'alerte pour une paire."""
-    sym = symbol.split(":")[-1]
-    by_dir = {}
-    for h, live in items:
-        by_dir.setdefault(h.direction, []).append((h, live))
-    lines = []
-    for d, lst in by_dir.items():
-        emoji, dlab = _LABEL[d]
-        lines.append(f"{emoji} <b>{sym} · {dlab}</b>")
-        for h, live in sorted(lst, key=lambda x: x[0].ts, reverse=True):
-            lines.append(_hit_line(h, live))
-    return "🔔 " + "\n".join(lines)
-
-
-def _build_chart(source, symbol, items, window):
-    """Génère l'image 2 panneaux (Weekly + H4). None si indisponible."""
-    try:
-        import chart
-        if not hasattr(source, "ohlc_full"):
-            return None
-        models = [w for _, live in items for w in live]
-        wm = min(models, key=lambda w: w.span)             # modèle weekly primaire
-        direction = wm.direction
-        target = wm.c1_high if direction == "bull" else wm.c1_low
-        same = [h for h, _ in items if h.direction == direction] or [items[0][0]]
-        h = max(same, key=lambda x: x.ts)
-        w_bars = source.ohlc_full(symbol, "1w", 40)[-40:]
-        h4_bars = source.ohlc_full(symbol, "4h", 80)[-80:]
-        if not w_bars or not h4_bars:
-            return None
-        return chart.crt_chart(symbol, w_bars, h4_bars, wm, target,
-                               (h.c1_low, h.c1_high), direction, DISPLAY_TZ)
-    except Exception as exc:
-        print(f"  [chart] {symbol}: {exc}", file=sys.stderr)
-        return None
-
-
 def send_new_alerts(results: list["SymResult"], tg, seen_path, source=None, window=1):
-    """Envoie une alerte par paire (photo du chart + légende), dédup. Renvoie (envoyés, total)."""
+    """Envoie UN message digest groupant les nouvelles manips H4 (dédup). Renvoie (envoyés, total)."""
     token, chat_id = tg
     seen = load_seen(seen_path)
     now_iso = datetime.now(timezone.utc).isoformat()
-    by_sym, total = {}, 0
+    new_items, new_keys, total = [], [], 0
     for symbol, weekly_ts, h, confirmed in iter_alerts(results):
         live = [w for w in confirmed if not w.done]
         if not live:                                 # cible weekly atteinte -> pas d'alerte
@@ -657,23 +585,17 @@ def send_new_alerts(results: list["SymResult"], tg, seen_path, source=None, wind
         key = alert_key(symbol, weekly_ts, h)
         if key in seen:
             continue
-        e = by_sym.setdefault(symbol, {"items": [], "keys": []})
-        e["items"].append((h, live))
-        e["keys"].append(key)
+        new_items.append((symbol, h, live))
+        new_keys.append(key)
 
-    sent = 0
-    for symbol, e in by_sym.items():
-        caption = _symbol_caption(symbol, e["items"])
-        buttons = [[{"text": f"📈 {symbol.split(':')[-1]} sur TradingView", "url": tv_url(symbol)}]]
-        photo = _build_chart(source, symbol, e["items"], window)
-        ok = (send_telegram_photo(token, chat_id, photo, caption, buttons) if photo
-              else send_telegram(token, chat_id, caption, buttons))
-        if ok:
-            for key in e["keys"]:
-                seen[key] = now_iso
-            sent += len(e["items"])
+    if new_items:
+        text, buttons = format_digest(new_items)
+        if not send_telegram(token, chat_id, text, buttons):
+            return 0, total                          # échec : on ne marque rien comme vu
+        for key in new_keys:
+            seen[key] = now_iso
     save_seen(seen_path, seen)
-    return sent, total
+    return len(new_items), total
 
 
 def maybe_send_recap(results, tg, state_path, recap_hour, stamp) -> bool:
