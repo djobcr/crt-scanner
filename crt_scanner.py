@@ -458,11 +458,22 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
             hts, hh, hl, hc = source.ohlcv(symbol, "4h", 80)
             n = len(hts)
 
-            # Extrêmes de la semaine en cours (TOUTES les bougies, même session exclue) :
-            # sert à savoir si la TARGET WEEKLY (bord opposé du range weekly) a été atteinte.
+            # Extrêmes de la semaine en cours (TOUTES les bougies, même session exclue).
             wk = [i for i in range(n) if week_start <= hts[i] < week_end]
             week_high = max((hh[i] for i in wk), default=None)
             week_low = min((hl[i] for i in wk), default=None)
+
+            # INVALIDATION : si le prix re-sweep le HIGH (bear) / LOW (bull) de la bougie de
+            # manipulation weekly, la manip a échoué -> setup mort -> on le supprime.
+            def _reswept(m):
+                if m.direction == "bear":
+                    return week_high is not None and week_high > m.c2_high
+                return week_low is not None and week_low < m.c2_low
+            models = [m for m in models if not _reswept(m)]
+            if not models:
+                continue
+
+            # TARGET WEEKLY atteinte (bord opposé du range weekly) -> setup consommé (grisé).
             for w in models:
                 if w.direction == "bull" and week_high is not None and week_high >= w.c1_high:
                     w.done = True
