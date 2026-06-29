@@ -1,91 +1,94 @@
 """
-chart.py — génère une image 2 panneaux (Weekly + H4) avec le CRT tracé, pour
-joindre aux alertes Telegram. Thème sombre, sans dépendance à TradingView.
+chart.py — image 2 panneaux (Weekly + H4) au style TradingView (thème gris)
+avec le CRT tracé. Pour joindre aux alertes Telegram.
 """
 import io
-from datetime import datetime, timezone
+from datetime import datetime
 
 import matplotlib
-matplotlib.use("Agg")                       # rendu sans écran (CI / serveur)
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-BG = "#0e1117"
-PANEL = "#0e1117"
-GRID = "#222a37"
-TXT = "#8a93a6"
-UP = "#3b82f6"          # bougie haussière (bleu, façon TradingView)
-DOWN = "#cbd5e1"        # bougie baissière (gris clair)
-BULL = "#2ebd85"
-BEAR = "#e8585e"
-GOLD = "#e3b15c"
+# Palette façon TradingView (thème gris clair)
+BG = "#9a9c9e"          # fond gris neutre
+UP = "#1c3d7a"          # bougie haussière : bleu marine
+DOWN = "#d7d9dc"        # bougie baissière : gris clair
+LINE = "#111316"        # lignes CRT : noir
+TAG_BG = "#111316"      # étiquette de prix : fond noir
+TAG_TX = "#ffffff"      # étiquette de prix : texte blanc
+AXTX = "#2b2e33"        # texte des axes
+WM = "#8d8f91"          # filigrane
+GOLD = "#7a5a12"        # petit repère TP (discret, lisible sur gris)
 _JOURS = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"]
 
 
-def _candles(ax, bars, tz):
+def _candles(ax, bars):
     for i, (ts, o, h, l, c) in enumerate(bars):
         col = UP if c >= o else DOWN
-        ax.plot([i, i], [l, h], color=col, linewidth=0.9, zorder=2)
+        ax.plot([i, i], [l, h], color=col, linewidth=1.0, zorder=2, solid_capstyle="butt")
         lo, hi = (o, c) if c >= o else (c, o)
-        ax.add_patch(Rectangle((i - 0.32, lo), 0.64, max(hi - lo, 1e-9),
-                               facecolor=col, edgecolor=col, linewidth=0.5, zorder=3))
-    ax.set_xlim(-1, len(bars))
-    # quelques dates en abscisse
-    step = max(1, len(bars) // 6)
+        ax.add_patch(Rectangle((i - 0.3, lo), 0.6, max(hi - lo, 1e-9),
+                               facecolor=col, edgecolor=col, linewidth=0.6, zorder=3))
+    ax.set_xlim(-1, len(bars) + 1)
+
+
+def _axis(ax, bars, tz, title):
+    ax.set_facecolor(BG)
+    for s in ax.spines.values():
+        s.set_visible(False)
+    ax.grid(False)
+    ax.yaxis.tick_right()
+    ax.tick_params(colors=AXTX, labelsize=8, length=0)
+    # dates en abscisse
+    step = max(1, len(bars) // 7)
     ticks = list(range(0, len(bars), step))
     ax.set_xticks(ticks)
-    labels = []
-    for i in ticks:
-        d = datetime.fromtimestamp(bars[i][0] / 1000, tz=tz)
-        labels.append(f"{d:%d/%m}")
-    ax.set_xticklabels(labels, color=TXT, fontsize=8)
+    ax.set_xticklabels([datetime.fromtimestamp(bars[i][0] / 1000, tz=tz).strftime("%d/%m")
+                        for i in ticks], color=AXTX, fontsize=8)
+    # filigrane central + titre haut-gauche (façon TradingView)
+    ax.text(0.5, 0.5, title, transform=ax.transAxes, ha="center", va="center",
+            color=WM, fontsize=26, fontweight="bold", alpha=0.45, zorder=0)
+    ax.text(0.008, 0.97, title, transform=ax.transAxes, ha="left", va="top",
+            color=AXTX, fontsize=9, fontweight="bold", zorder=6)
 
 
-def _style(ax, title, dir_color):
-    ax.set_facecolor(PANEL)
-    ax.set_title(title, color=dir_color, fontsize=11, fontweight="bold", loc="left", pad=8)
-    ax.grid(color=GRID, linewidth=0.5, alpha=0.6)
-    ax.tick_params(colors=TXT, labelsize=8)
-    for s in ax.spines.values():
-        s.set_color(GRID)
-    ax.yaxis.tick_right()
-
-
-def _hline(ax, y, color, label, ls="-", va="bottom"):
-    ax.axhline(y, color=color, linewidth=1.1, linestyle=ls, zorder=4, alpha=0.9)
-    ax.text(0.008, y, label, transform=ax.get_yaxis_transform(),
-            ha="left", va=va, color=color, fontsize=7.5, fontweight="bold", zorder=5)
+def _crt_line(ax, y, n_bars, label=None, accent=False):
+    ax.axhline(y, color=LINE, linewidth=1.0, zorder=4)
+    # étiquette de prix (boîte noire) sur le bord droit, façon TradingView
+    ax.annotate(f"{y:.5g}".replace(".", ","), xy=(1.0, y), xycoords=("axes fraction", "data"),
+                xytext=(2, 0), textcoords="offset points", ha="left", va="center",
+                color=TAG_TX, fontsize=7.5, fontweight="bold", zorder=7, clip_on=False,
+                bbox=dict(boxstyle="square,pad=0.25", fc=TAG_BG, ec="none"))
+    if label:
+        ax.text(0.008, y, label, transform=ax.get_yaxis_transform(), ha="left",
+                va="bottom", color=(GOLD if accent else AXTX), fontsize=7.5,
+                fontweight="bold", zorder=6)
 
 
 def crt_chart(symbol, w_bars, h4_bars, weekly, target, h4_range, direction, tz) -> bytes:
-    """weekly = CRT weekly (objet avec c1_low/c1_high/c2_high/c2_low) ; h4_range = (low, high)."""
-    dir_txt = "SHORT" if direction == "bear" else "LONG"
-    dcol = BEAR if direction == "bear" else BULL
     sym = symbol.split(":")[-1]
+    dir_txt = "SHORT" if direction == "bear" else "LONG"
 
-    fig, (axw, axh) = plt.subplots(2, 1, figsize=(8, 8.5), facecolor=BG,
-                                   gridspec_kw={"hspace": 0.22})
+    fig, (axw, axh) = plt.subplots(2, 1, figsize=(8.2, 8.6), facecolor=BG,
+                                   gridspec_kw={"hspace": 0.16})
 
-    # --- Weekly ---
-    _candles(axw, w_bars, tz)
-    _style(axw, f"{sym} · Weekly · {dir_txt}", dcol)
-    axw.axhspan(weekly.c1_low, weekly.c1_high, color=dcol, alpha=0.06, zorder=1)
-    _hline(axw, weekly.c1_high, "#5b6677", "CRT range high", "--", va="bottom")
-    _hline(axw, weekly.c1_low, "#5b6677", "CRT range low", "--", va="top")
+    # Weekly : les 2 bords du range CRT (dont la cible weekly), + le niveau de manip
+    _candles(axw, w_bars)
+    _axis(axw, w_bars, tz, f"{sym} · 1W · {dir_txt}")
+    _crt_line(axw, weekly.c1_high, len(w_bars),
+              "TP cible" if direction == "bull" else None, accent=(direction == "bull"))
+    _crt_line(axw, weekly.c1_low, len(w_bars),
+              "TP cible" if direction == "bear" else None, accent=(direction == "bear"))
     manip = weekly.c2_high if direction == "bear" else weekly.c2_low
-    _hline(axw, manip, dcol, "manip (invalidation re-sweep)", va="top" if direction == "bull" else "bottom")
-    _hline(axw, target, GOLD, "TP · cible weekly", va="bottom")
+    _crt_line(axw, manip, len(w_bars), "manip (invalid. re-sweep)")
 
-    # --- H4 ---
-    _candles(axh, h4_bars, tz)
-    _style(axh, f"{sym} · H4 · CRT dans le biais", dcol)
+    # H4 : le range du CRT H4
+    _candles(axh, h4_bars)
+    _axis(axh, h4_bars, tz, f"{sym} · 4H")
     hl, hh = h4_range
-    axh.axhspan(hl, hh, color=dcol, alpha=0.06, zorder=1)
-    _hline(axh, hh, "#5b6677", "CRT H4 high", "--", va="bottom")
-    _hline(axh, hl, "#5b6677", "CRT H4 low", "--", va="top")
-
-    stamp = datetime.now(tz=tz).strftime("%Y-%m-%d %H:%M %Z")
-    fig.text(0.012, 0.012, f"CRT Scanner · {stamp}", color=TXT, fontsize=7.5)
+    _crt_line(axh, hh, len(h4_bars), "CRT H4")
+    _crt_line(axh, hl, len(h4_bars))
 
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=130, facecolor=BG, bbox_inches="tight")
