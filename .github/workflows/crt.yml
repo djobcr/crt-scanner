@@ -38,7 +38,7 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install pandas tradingview-datafeed
+      - run: pip install pandas tradingview-datafeed matplotlib requests
 
       # Garde l'état d'une exécution à l'autre : dédup des alertes, historique,
       # date du dernier récap quotidien.

@@ -238,6 +238,24 @@ class TradingViewSource(Source):
         return ([r[0] for r in rows], [r[1] for r in rows],
                 [r[2] for r in rows], [r[3] for r in rows])
 
+    def ohlc_full(self, symbol, timeframe, limit):
+        """Comme ohlcv mais renvoie des bougies complètes (ts, open, high, low, close) — pour les charts."""
+        sym, ex = self._split(symbol)
+        df = self.tv.get_hist(sym, ex, interval=self._TF[timeframe], n_bars=limit + 2)
+        if df is None or len(df) == 0:
+            return []
+        df = df.rename(columns={c: c.lower() for c in df.columns})
+        rows = []
+        for ts, row in df.iterrows():
+            pts = pd.Timestamp(ts)
+            if pts.tzinfo is None:
+                pts = pts.tz_localize(self.src_tz)
+            open_ms = int(pts.timestamp() * 1000)
+            rows.append((open_ms, float(row["open"]), float(row["high"]),
+                         float(row["low"]), float(row["close"])))
+        now = int(time.time() * 1000)
+        return [r for r in rows if r[0] + TF_MS[timeframe] <= now]   # bougies clôturées
+
     def default_symbols(self):
         majors = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
         return ([f"{self.tv_exchange}:{m}" for m in majors]
@@ -318,6 +336,22 @@ def send_telegram(token: str, chat_id: str, text: str, buttons=None) -> bool:
         return False
 
 
+def send_telegram_photo(token, chat_id, photo_bytes, caption, buttons=None) -> bool:
+    """Envoie une photo (chart) avec légende. Utilise requests (multipart)."""
+    import requests
+    url = f"https://api.telegram.org/bot{token}/sendPhoto"
+    data = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    if buttons:
+        data["reply_markup"] = json.dumps({"inline_keyboard": buttons})
+    try:
+        r = requests.post(url, data=data,
+                          files={"photo": ("crt.png", photo_bytes, "image/png")}, timeout=30)
+        return r.status_code == 200
+    except Exception as exc:
+        print(f"  [telegram] échec photo : {exc}", file=sys.stderr)
+        return False
+
+
 _LABEL = {"bull": ("🟢", "LONG"), "bear": ("🔴", "SHORT"), "both": ("⚪", "OUTSIDE")}
 
 
@@ -376,7 +410,7 @@ def build_recap(results: list, stamp: str) -> tuple:
             if w.done:                          # target weekly atteinte -> on ignore
                 continue
             emoji, dlab = _LABEL[w.direction]
-            nh = sum(1 for hh in res.h4s if dir_aligned(w.direction, hh.direction) and not hh.done)
+            nh = sum(1 for hh in res.h4s if dir_aligned(w.direction, hh.direction))
             parts.append(f"{emoji} W{w.span + 2}C {dlab} ({nh} H4)")
         if not parts:
             continue
@@ -417,8 +451,8 @@ class H4Hit:
     ts: int
     span: int
     direction: str
-    target: float = 0.0   # bord opposé du range H4 (cible du trade)
-    done: bool = False    # cible déjà touchée par une bougie postérieure
+    c1_low: float = 0.0    # range du CRT H4 (pour tracer le chart)
+    c1_high: float = 0.0
 
 
 @dataclass
@@ -498,9 +532,9 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
                         continue
                     seen_pair.add(key)
                     # NB : pas de "target H4". La seule cible = le bord opposé du CRT weekly
-                    # (géré au niveau du modèle weekly via w.done). Le bord du range H4 n'est
-                    # pas un objectif dans la stratégie.
-                    h4s.append(H4Hit(hts[i], crt.span, crt.direction))
+                    # (géré au niveau du modèle weekly via w.done). On garde le range H4
+                    # (c1_low/c1_high) uniquement pour tracer le chart.
+                    h4s.append(H4Hit(hts[i], crt.span, crt.direction, crt.c1_low, crt.c1_high))
 
             results.append(SymResult(symbol, weekly_ts, models, h4s))
         except Exception as exc:
@@ -567,35 +601,79 @@ def run_once(source, symbols, require_align, out=None, tg=None, seen_path=None,
         print(f"\n💾 exporté → {out}")
 
     if tg:
-        sent, total = send_new_alerts(results, tg, seen_path)
+        sent, total = send_new_alerts(results, tg, seen_path, source, window)
         print(f"📨 {sent} nouvelle(s) alerte(s) Telegram ({total - sent} déjà notifiée(s)).")
 
 
-def send_new_alerts(results: list["SymResult"], tg, seen_path):
-    """Envoie UN message digest groupant les nouvelles manips H4 (dédup). Renvoie (envoyés, total)."""
+def _symbol_caption(symbol, items):
+    """items = [(H4Hit, [modèles weekly confirmés])]. Légende d'alerte pour une paire."""
+    sym = symbol.split(":")[-1]
+    by_dir = {}
+    for h, live in items:
+        by_dir.setdefault(h.direction, []).append((h, live))
+    lines = []
+    for d, lst in by_dir.items():
+        emoji, dlab = _LABEL[d]
+        lines.append(f"{emoji} <b>{sym} · {dlab}</b>")
+        for h, live in sorted(lst, key=lambda x: x[0].ts, reverse=True):
+            lines.append(_hit_line(h, live))
+    return "🔔 " + "\n".join(lines)
+
+
+def _build_chart(source, symbol, items, window):
+    """Génère l'image 2 panneaux (Weekly + H4). None si indisponible."""
+    try:
+        import chart
+        if not hasattr(source, "ohlc_full"):
+            return None
+        models = [w for _, live in items for w in live]
+        wm = min(models, key=lambda w: w.span)             # modèle weekly primaire
+        direction = wm.direction
+        target = wm.c1_high if direction == "bull" else wm.c1_low
+        same = [h for h, _ in items if h.direction == direction] or [items[0][0]]
+        h = max(same, key=lambda x: x.ts)
+        w_bars = source.ohlc_full(symbol, "1w", 24)[-24:]
+        h4_bars = source.ohlc_full(symbol, "4h", 70)[-70:]
+        if not w_bars or not h4_bars:
+            return None
+        return chart.crt_chart(symbol, w_bars, h4_bars, wm, target,
+                               (h.c1_low, h.c1_high), direction, DISPLAY_TZ)
+    except Exception as exc:
+        print(f"  [chart] {symbol}: {exc}", file=sys.stderr)
+        return None
+
+
+def send_new_alerts(results: list["SymResult"], tg, seen_path, source=None, window=1):
+    """Envoie une alerte par paire (photo du chart + légende), dédup. Renvoie (envoyés, total)."""
     token, chat_id = tg
     seen = load_seen(seen_path)
     now_iso = datetime.now(timezone.utc).isoformat()
-    new_items, new_keys, total = [], [], 0
+    by_sym, total = {}, 0
     for symbol, weekly_ts, h, confirmed in iter_alerts(results):
         live = [w for w in confirmed if not w.done]
-        if h.done or not live:           # target atteinte (H4 ou tous les weekly) -> pas d'alerte
+        if not live:                                 # cible weekly atteinte -> pas d'alerte
             continue
         total += 1
         key = alert_key(symbol, weekly_ts, h)
         if key in seen:
             continue
-        new_items.append((symbol, h, live))
-        new_keys.append(key)
+        e = by_sym.setdefault(symbol, {"items": [], "keys": []})
+        e["items"].append((h, live))
+        e["keys"].append(key)
 
-    if new_items:
-        text, buttons = format_digest(new_items)
-        if not send_telegram(token, chat_id, text, buttons):
-            return 0, total                       # échec : on ne marque rien comme vu
-        for key in new_keys:
-            seen[key] = now_iso
+    sent = 0
+    for symbol, e in by_sym.items():
+        caption = _symbol_caption(symbol, e["items"])
+        buttons = [[{"text": f"📈 {symbol.split(':')[-1]} sur TradingView", "url": tv_url(symbol)}]]
+        photo = _build_chart(source, symbol, e["items"], window)
+        ok = (send_telegram_photo(token, chat_id, photo, caption, buttons) if photo
+              else send_telegram(token, chat_id, caption, buttons))
+        if ok:
+            for key in e["keys"]:
+                seen[key] = now_iso
+            sent += len(e["items"])
     save_seen(seen_path, seen)
-    return len(new_items), total
+    return sent, total
 
 
 def maybe_send_recap(results, tg, state_path, recap_hour, stamp) -> bool:
@@ -769,7 +847,7 @@ def render_dashboard(results, stamp, window, source_name, refresh_s=60, skip=Non
                 dcls, dlab = _DIR[h.direction]
                 dt = datetime.fromtimestamp(h.ts / 1000, tz=DISPLAY_TZ)
                 when = f"{_JOURS_FR[dt.weekday()]} {dt:%d/%m · %H:%M}"
-                rdone = h.done or w.done
+                rdone = w.done            # plus de "done" au niveau H4 : seul le weekly compte
                 fresh = " fresh" if (h.ts == latest_ts and not rdone) else ""
                 hext = " ext" if h.span > 1 else ""
                 mark = '<span class="tgt" title="target atteinte">🎯</span>' if rdone else ""
@@ -911,7 +989,7 @@ def serve_dashboard(source, symbols, require_align, window, port, tg,
                 save_json(history_file, hist)
                 state["hist"] = hist
                 if tg:
-                    send_new_alerts(ms, tg, seen_path)
+                    send_new_alerts(ms, tg, seen_path, source, window)
                     maybe_send_recap(ms, tg, state_file, recap_hour, state["stamp"])
             except Exception as exc:                       # un scan raté ne tue pas le serveur
                 print(f"[serve] scan erreur : {exc}", file=sys.stderr)
@@ -1055,7 +1133,7 @@ def main() -> None:
         msg = (f"📊 dashboard + historique écrits ({len(results)} paires · {nmodels} modèles · "
                f"{n_new} nouveau(x) en historique)")
         if tg:
-            sent, _ = send_new_alerts(results, tg, args.seen_file)
+            sent, _ = send_new_alerts(results, tg, args.seen_file, source, args.crt_window)
             if maybe_send_recap(results, tg, args.state_file, args.daily_recap, stamp):
                 msg += " · 🗞️ récap envoyé"
             msg += f" · 📨 {sent} alerte(s)"
