@@ -10,26 +10,27 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-# Palette façon TradingView (thème gris clair)
-BG = "#9a9c9e"          # fond gris neutre
-UP = "#1c3d7a"          # bougie haussière : bleu marine
-DOWN = "#d7d9dc"        # bougie baissière : gris clair
-LINE = "#111316"        # lignes CRT : noir
-TAG_BG = "#111316"      # étiquette de prix : fond noir
+# Palette (couleurs exactes fournies par Djo)
+BG = "#B8B8B8"          # fond
+UP = "#0E2C80"          # bougie haussière
+DOWN = "#DBDBDB"        # bougie baissière
+BORDER = "#000000"      # bordures + mèches des bougies
+LINE = "#000000"        # lignes CRT : noir
+TAG_BG = "#000000"      # étiquette de prix : fond noir
 TAG_TX = "#ffffff"      # étiquette de prix : texte blanc
-AXTX = "#2b2e33"        # texte des axes
-WM = "#8d8f91"          # filigrane
-GOLD = "#7a5a12"        # petit repère TP (discret, lisible sur gris)
+AXTX = "#1c1c1c"        # texte des axes
+WM = "#aeaeae"          # filigrane
+GOLD = "#6b4e0a"        # petit repère TP (discret, lisible sur gris)
 _JOURS = ["lun", "mar", "mer", "jeu", "ven", "sam", "dim"]
 
 
 def _candles(ax, bars):
     for i, (ts, o, h, l, c) in enumerate(bars):
         col = UP if c >= o else DOWN
-        ax.plot([i, i], [l, h], color=col, linewidth=1.0, zorder=2, solid_capstyle="butt")
+        ax.plot([i, i], [l, h], color=BORDER, linewidth=0.9, zorder=2, solid_capstyle="butt")
         lo, hi = (o, c) if c >= o else (c, o)
         ax.add_patch(Rectangle((i - 0.3, lo), 0.6, max(hi - lo, 1e-9),
-                               facecolor=col, edgecolor=col, linewidth=0.6, zorder=3))
+                               facecolor=col, edgecolor=BORDER, linewidth=0.7, zorder=3))
     ax.set_xlim(-1, len(bars) + 1)
 
 
