@@ -105,8 +105,12 @@ def crt_at(highs, lows, closes, i: int, window: int = 1) -> CRT | None:
     stop = max(-1, i - 1 - window)
     for r in range(i - 1, stop, -1):                 # range candle la plus proche d'abord
         c1_high, c1_low = highs[r], lows[r]
-        swept_low = c2_low < c1_low
-        swept_high = c2_high > c1_high
+        # Sweep évalué sur TOUTE la formation (range exclue -> manipulation incluse) :
+        # si les deux extrêmes ont été pris pendant la formation -> double purge -> 'both'.
+        seg_high = max(highs[r + 1:i + 1])
+        seg_low = min(lows[r + 1:i + 1])
+        swept_low = seg_low < c1_low
+        swept_high = seg_high > c1_high
         closed_inside = c1_low <= c2_close <= c1_high
         if not closed_inside or not (swept_low or swept_high):
             continue
@@ -139,8 +143,12 @@ def crt_all(highs, lows, closes, i: int, window: int = 1) -> list[CRT]:
     stop = max(-1, i - 1 - window)
     for r in range(i - 1, stop, -1):
         c1_high, c1_low = highs[r], lows[r]
-        swept_low = c2_low < c1_low
-        swept_high = c2_high > c1_high
+        # Sweep évalué sur TOUTE la formation (range exclue -> manipulation incluse) :
+        # si les deux extrêmes ont été pris pendant la formation -> double purge -> 'both'.
+        seg_high = max(highs[r + 1:i + 1])
+        seg_low = min(lows[r + 1:i + 1])
+        swept_low = seg_low < c1_low
+        swept_high = seg_high > c1_high
         if not (c1_low <= c2_close <= c1_high) or not (swept_low or swept_high):
             continue
         if swept_low and not swept_high:
