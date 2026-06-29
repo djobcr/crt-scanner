@@ -451,6 +451,9 @@ def scan(source: Source, symbols: list[str], require_align: bool = True,
             if ctx is None:
                 continue
             models, weekly_ts, week_start, week_end = ctx
+            models = [m for m in models if m.direction != "both"]   # outside weekly = hors plan
+            if not models:
+                continue
 
             hts, hh, hl, hc = source.ohlcv(symbol, "4h", 80)
             n = len(hts)
